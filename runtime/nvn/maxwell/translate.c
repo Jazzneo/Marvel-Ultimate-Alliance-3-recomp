@@ -470,12 +470,17 @@ static bool emit_half(Ctx *c, uint64_t w) {
         hstore(c, d, t, merge, sat);
         return true;
     }
-    // ---- HSETP2 / HSET2 (reg forms)
-    if ((op & 0xfff8) == 0x5d20 || (op & 0xfff8) == 0x5d18) {
-        bool setp = (op & 0xfff8) == 0x5d20;
+    // ---- HSETP2 / HSET2 (reg forms), HSETP2 cbuf / imm (7e80 / 7e00: B is a constant as one f32 for both halves, or
+    // two immediate halves; the comparison moves to 49 and .H_AND to 53)
+    bool setp_ci = (op & 0xfe80) == 0x7e80 || (op & 0xfe80) == 0x7e00;
+    if ((op & 0xfff8) == 0x5d20 || (op & 0xfff8) == 0x5d18 || setp_ci) {
+        bool setp = (op & 0xfff8) == 0x5d20 || setp_ci;
         const char *x = HS(R(a), (int)bits(w, 47, 2), bits(w, 43, 1), bits(w, 44, 1));
-        const char *y = HS(R((int)bits(w, 20, 8)), (int)bits(w, 28, 2), bits(w, 31, 1), bits(w, 30, 1));
-        int cop = (int)bits(w, 35, 4), bop = (int)bits(w, 45, 2);
+        const char *y;
+        if (!setp_ci) y = HS(R((int)bits(w, 20, 8)), (int)bits(w, 28, 2), bits(w, 31, 1), bits(w, 30, 1));
+        else if (op & 0x80) y = HS(cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb), 1, bits(w, 56, 1), bits(w, 54, 1));
+        else { sprintf(ib, "0x%08xu", himm(w)); y = HS(ib, 0, false, false); }
+        int cop = (int)bits(w, setp_ci ? 49 : 35, 4), bop = (int)bits(w, 45, 2);
         const char *pp = P((int)bits(w, 39, 3), bits(w, 42, 1));
         char lx[512], ly[512];
         sp(&c->body, "    { float2 hx_ = %s, hy_ = %s; bool pp = %s;\n", x, y, pp);
@@ -484,7 +489,7 @@ static bool emit_half(Ctx *c, uint64_t w) {
         sp(&c->body, "      bool l = %s, h = %s;\n", lx, ly);
         if (setp) {
             int pa = (int)bits(w, 3, 3), pb = (int)bits(w, 0, 3);
-            if (bits(w, 49, 1)) {  // .H_AND: each half is combined with the predicate first, then they're ANDed
+            if (bits(w, setp_ci ? 53 : 49, 1)) {  // .H_AND: each half is combined with the predicate first, then ANDed
                 sp(&c->body, "      l = (l %s pp) && (h %s pp); h = !l;\n", bool_op(bop), bool_op(bop));
                 if (pa != PT) { c->pred_used[pa] = 1; sp(&c->body, "      p%d = l;\n", pa); }
                 if (pb != PT) { c->pred_used[pb] = 1; sp(&c->body, "      p%d = h;\n", pb); }
@@ -820,6 +825,33 @@ static void emit_texs(Ctx *c, uint64_t w, bool fetch) {
     write_tex_result(c, slot, call, mask, d0, d1, true, !bits(w, 59, 1));  // 0xd0/0xd2: .F16 results
 }
 
+// TLD4S: a 2D gather (component at 52, or a depth compare with .DC at 50), results as TEXS's (all four: d0, d0 + 1,
+// d1, d1 + 1). Coordinates: x in a and y in b, or with .AOFFI (51) / .DC: x, y in a, a + 1 and the packed offset
+// (6-bit signed x, y bytes), then the reference in b, b + 1. .F16 at 55. GLSL only (the Vulkan backend).
+static void emit_tld4s(Ctx *c, uint64_t w) {
+    int d0 = (int)bits(w, 0, 8), d1 = (int)bits(w, 28, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
+    uint32_t index = (uint32_t)bits(w, 36, 13);
+    int comp = (int)bits(w, 52, 2);
+    bool dc = bits(w, 50, 1), aoffi = bits(w, 51, 1), f16 = bits(w, 55, 1);
+    if (!c->glsl) { fail(c, "tld4s (msl)"); return; }
+    char ra[16], ra1[16], rb[16], rb1[16];
+    const char *A = reg(c, a, ra), *A1 = reg(c, a == RZ ? RZ : a + 1, ra1), *Bv = reg(c, b, rb),
+               *B1 = reg(c, b == RZ ? RZ : b + 1, rb1);
+    const char *y = aoffi || dc ? A1 : Bv, *off = aoffi ? Bv : NULL, *dref = dc ? (aoffi ? B1 : Bv) : NULL;
+    int slot = tex_slot(c, index, TEXTYPE_2D, dc, false);
+    if (c->fail) return;
+    char xy[700], P[900], call[1200];
+    if (off)
+        snprintf(xy, sizeof xy, "(vec2(as_f(%s), as_f(%s)) + vec2(ivec2(int(%s << 26) >> 26, int(%s << 18) >> 26)) / "
+                 "vec2(tsize%d(0).xy))", A, y, off, off, slot);
+    else snprintf(xy, sizeof xy, "vec2(as_f(%s), as_f(%s))", A, y);
+    if (c->stage != STAGE_VERTEX) { snprintf(P, sizeof P, "uvs(%s, rscale[%d])", xy, slot + 1); c->uses_rscale = true; }
+    else snprintf(P, sizeof P, "%s", xy);
+    if (dc) snprintf(call, sizeof call, "textureGather(t%d, %s, as_f(%s))", slot, P, dref);
+    else snprintf(call, sizeof call, "textureGather(t%d, %s, %d)", slot, P, comp);
+    write_tex_result(c, slot, call, 0xF, d0, d1, true, f16);
+}
+
 // TEX (full form): coordinates from consecutive registers at gpr8, extra parameters at gpr20.
 static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8), b = (int)bits(w, 20, 8);
@@ -1114,6 +1146,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         emit_surface(c, w, false);
     } else if (OPM(0xeb28000000000000ull, 0xfff8000000000000ull)) {  // SUST
         emit_surface(c, w, true);
+    } else if (OPM(0xdf00000000000000ull, 0xffc0000000000000ull)) {  // TLD4S
+        emit_tld4s(c, w);
     } else if (OPM(0xdf48000000000000ull, 0xfff8000000000000ull)) {  // TXQ
         uint32_t index = (uint32_t)bits(w, 36, 13);
         int qt = (int)bits(w, 22, 6);
@@ -1816,6 +1850,24 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             set_reg(c, d, t);
         }
         if (pd != PT) { c->pred_used[pd] = 1; sp(&c->body, "    p%d = true;\n", pd); }
+    } else if (OPM(0x50d8000000000000ull, 0xfff8000000000000ull)) {  // VOTE (MUA3's compute shaders: VOTE.ALL R, PT, PT)
+        // d = the ballot of the source predicate (the active lanes for PT); the predicate destination at 45 = .ALL /
+        // .ANY / .EQ of it. Maxwell's warp is 32 lanes, as NVIDIA's subgroups (.x of the ballot). Vertex stages: one lane.
+        int mode = (int)bits(w, 48, 2), vp = (int)bits(w, 45, 3);
+        const char *src = P((int)bits(w, 39, 3), bits(w, 42, 1));
+        if (mode == 3) { fail(c, "vote mode 3"); }
+        else if (!c->glsl) { fail(c, "vote (msl)"); }
+        else {
+            bool lane = c->stage == STAGE_VERTEX;
+            sp(&c->body, "    { bool vs_ = %s;\n", src);
+            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, lane ? "      r%d = vs_ ? 1u : 0u;\n" : "      r%d = subgroupBallot(vs_).x;\n", d); }
+            if (vp != PT) {
+                static const char *const fn[] = {"subgroupAll(vs_)", "subgroupAny(vs_)", "subgroupAllEqual(vs_)"};
+                c->pred_used[vp] = 1;
+                sp(&c->body, "      p%d = %s;\n", vp, lane ? (mode == 2 ? "true" : "vs_") : fn[mode]);
+            }
+            sp(&c->body, "    }\n");
+        }
     } else if (OPM(0x38f0000000000000ull, 0xfef8000000000000ull) || OPM(0x5cf0000000000000ull, 0xfff8000000000000ull) ||
                OPM(0x4cf0000000000000ull, 0xfff8000000000000ull)) {  // R2P
         if (bits(w, 40, 1)) { fail(c, "r2p cc"); }
@@ -1984,6 +2036,8 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_basic : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
+    "#extension GL_KHR_shader_subgroup_vote : require\n"
+    "#extension GL_KHR_shader_subgroup_ballot : require\n"
     "#extension GL_EXT_texture_shadow_lod : require\n"
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"

@@ -1,4 +1,5 @@
 // Applet manager (appletOE), apm, and lm.
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -158,7 +159,23 @@ static void application_functions(Service *s, IpcReq *req, IpcResp *resp) {
         resp_size(resp, 8);
         break;
     }
-    case 23: memcpy(resp->data, "1.0.0", 6); resp_size(resp, 0x10); break;
+    case 23: {  // GetDisplayVersion: the game's own (<game>/control/control.nacp, +0x3060), else 1.0.0
+        char ver[0x10] = "1.0.0", path[1200];
+        size_t dl = g_romfs_dir ? strlen(g_romfs_dir) : 0;
+        if (dl > 6 && !strcmp(g_romfs_dir + dl - 6, "/romfs")) {
+            snprintf(path, sizeof path, "%.*s/control/control.nacp", (int)(dl - 6), g_romfs_dir);
+            FILE *f = fopen(path, "rb");
+            if (f) {
+                char v[0x10];
+                if (!fseek(f, 0x3060, SEEK_SET) && fread(v, 1, sizeof v, f) == sizeof v && v[0]) memcpy(ver, v, sizeof v);
+                fclose(f);
+            }
+        }
+        ver[sizeof ver - 1] = 0;
+        memcpy(resp->data, ver, sizeof ver);
+        resp_size(resp, 0x10);
+        break;
+    }
     case 40: OUT(uint8_t, 0) = 0; resp_size(resp, 1); break;  // NotifyRunning
     case 130: case 140: resp->copy_handles[resp->ncopy++] = new_event(); break;
     default: UNHANDLED("IApplicationFunctions");

@@ -2,7 +2,30 @@
 
 What this project changed relative to [LAS Recomp](https://github.com/peiikai/LASRecomp) (its recompiler and Switch
 runtime), why, and where. It also lists the debugging switches, the test routes, the known gaps and the next steps.
-Newest work is at the bottom of each section; the commits are on `main`.
+It started as DOAX3 Recomp (the sections from "Project setup" to "Test routes" are that work, which MUA3 inherits:
+both games are Koei Tecmo's engine) and was retargeted at MUA3 on the `mua3` branch.
+
+## Retargeted at MARVEL ULTIMATE ALLIANCE 3 4.0.1 (`mua3` branch)
+
+- **The game:** title 010060700AC50000, the update's code (4.0.1, NintendoSDK 6.5.0, main build ID E853C44FDF18B88F).
+  The DLC characters and stories ship in the update; the Expansion Pass (010060700AC51001) is an entitlement whose
+  data is one empty file.
+- **`tools/nsp_extract.py`:**
+  - `--update`: the update's exefs, and its RomFS as a Bktr patch over the base game's (indirect storage remapping
+    ranges to the base or the patch, and AesCtrEx: the patch's counter generation by range);
+  - `--dlc`: each add-on's RomFS image to `extracted/aoc/<id>.romfs`;
+  - `extracted/romfs.src` instead of an 18.4 GB copy: where the image is in the NSPs, the keys and both tables
+    (`--romfs extract` still copies every file; `--files <text>` copies the matching ones). Checked against the RomFS's
+    own SHA-256 level: 602 random 16 KB blocks from both storages, no mismatch.
+- **`runtime/romfs_nca.c`:** reads the image in place (AES-128-CTR on AES-NI); `runtime/services/fs.c` uses it when
+  `romfs.src` is there.
+- **Module layout:** `main` is 0x4fc1000 bytes, so `sdk` moves to 0x7006000000 and glslc to 0x7007000000. glslc is
+  `subsdk1` here (`GLSLC_NSO`); `subsdk0` is the multimedia library, still host code.
+- **Services:** aoc reports the add-ons whose images were extracted and fsp-srv's OpenDataStorageByDataId serves
+  them; GetDisplayVersion reads `extracted/control/control.nacp` (the title shows "Ver. 4.0.1").
+- **Movie:** `movie::Buffer::SetNvnDev` / `SetNvnSync` are no-ops (the host decoder copies into guest memory).
+- **Shader translator:** TLD4S (2D gather, with .AOFFI / .DC), HSETP2's constant-buffer and immediate forms, and VOTE
+  (subgroup ballot / all / any / all-equal; needs `GL_KHR_shader_subgroup_vote` / `_ballot`).
 
 ## Project setup (ae4fa76)
 
@@ -161,31 +184,24 @@ Inherited from LAS Recomp and used here:
 | `LARECOMP_SHADER_PREP=0` | no shader preparation at startup |
 | `LARECOMP_SYNC_SHADERS=1` | compile on first use, blocking, instead of skipping draws for a few frames |
 
-## Status (2026-10-31)
+## Status (MUA3, 2026-10-31)
 
-- **Plays at 30 fps at 1920x1080.** The game renders 3D at 1600x900 and the UI at 1080p.
-- **Scenes checked correct:**
-  - title and menus;
-  - island map, hotel, casino, closet, Owner Shop;
-  - beach cutscenes, relax/shower, sunset, night;
-  - a full Beach Volleyball match;
-  - the opening movie.
-- **Performance** (RTX 3060):
-  - GPU ~7 ms per frame;
-  - render thread ~2 ms per frame;
-  - about half a CPU core.
-- **Stability:** a 10.7-minute random-input run had no crash.
-- **First-visit shader pop-in** is by design (`LARECOMP_SYNC_SHADERS=1` stalls instead).
+- **Runs at 30 fps at 1920x1080** (i9-10900, RTX 3080 Ti) through the title, the update history, save slot and
+  difficulty selection. No crash in runs of up to 5.5 minutes.
+- **Checked correct:** title, update history pages, save slot list and its dialog, difficulty selection.
+- **Not reached yet:** the opening, gameplay. The frame-scripted input (`LARECOMP_INPUT`) drifts between runs here
+  (load times differ), so it lands on other screens; reaching gameplay needs a person playing or a sturdier route.
 
 ## Known gaps and next steps
 
-- **Load stalls:** 60–110 ms remain, from render-thread deswizzling (~30 ms) and ring-slot waits.
-- **`game_in_play` and level hooks** are not located, so slow-frame classification treats every frame as a load.
-- **Stencil sampling in graphics stages:** not handled. None of the game's graphics shaders use it so far, and the
-  translator logs it if one does.
-- **Textures:** 8- and 16-bit integer formats; swkbd (software keyboard) offsets.
-- **Untested:** the volleyball serve with scripted input; other activities (Beach Flags, pool).
-- **Update / DLC:** only from your own console dumps (see the README). They need:
-  - BKTR patch support in `tools/nsp_extract.py`;
-  - recompiling the updated code;
-  - aoc reporting the DLC you own and mounting its data.
+- **Frame rate in menus:** 24–28 fps in some menu screens (~8000 draws per 2 s report); not yet profiled.
+- **Draws skipped:** ~100–120 per 2 s report in menus, with no graphics shader failing to translate: the cause isn't
+  known yet.
+- **Compute shaders:** two use ATOMS (shared-memory atomics, 0xec00: not in the translator yet), one binds image 72
+  as two types.
+- **60 fps and above:** the game runs at 30 fps (present interval 2). Finding its frame step and whether its logic
+  is tied to the frame rate comes once gameplay runs; any unlock will be a setting that can be turned off.
+- **Build time:** `generated/glslc/glslc_188.c` alone took over 15 minutes at -O1; splitting that chunk would cut the
+  first build a lot.
+- From DOAX3, still open: `game_in_play` and level hooks (slow-frame classification treats every frame as a load),
+  stencil sampling in graphics stages, 8- and 16-bit integer texture formats, swkbd offsets.

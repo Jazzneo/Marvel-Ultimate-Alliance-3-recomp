@@ -136,6 +136,9 @@ HLE_FUNC("_ZNK5movie6Buffer4BaseEv", buf_base) { c->x[0] = BUF(c->x[0])->base; }
 HLE_FUNC("_ZNK5movie6Buffer4SizeEv", buf_size) { c->x[0] = (uint32_t)BUF(c->x[0])->size; }
 HLE_FUNC("_ZNK5movie6Buffer6OffsetEv", buf_offset) { c->x[0] = (uint32_t)BUF(c->x[0])->offset; }
 HLE_FUNC("_ZNK5movie6Buffer8CapacityEv", buf_capacity) { c->x[0] = BUF(c->x[0])->capacity; }
+// (MUA3: the NVN device and sync a GPU-side buffer would use; the host decoder copies into guest memory instead)
+HLE_FUNC("_ZN5movie6Buffer9SetNvnDevEPv", buf_set_nvn_dev) { (void)c; }
+HLE_FUNC("_ZN5movie6Buffer10SetNvnSyncEPv", buf_set_nvn_sync) { (void)c; }
 HLE_FUNC("_ZN5movie6Buffer8SetRangeEii", buf_set_range) { BUF(c->x[0])->offset = (int32_t)c->x[1]; BUF(c->x[0])->size = (int32_t)c->x[2]; }
 HLE_FUNC("_ZN5movie6Buffer18SetDataAndCapacityEPvm", buf_set_data) {
     MBuffer *b = BUF(c->x[0]);
