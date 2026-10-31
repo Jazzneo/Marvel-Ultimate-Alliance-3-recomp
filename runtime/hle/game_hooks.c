@@ -1,6 +1,6 @@
 // Game hooks: the places where the shared runtime (input, renderer, file system, frame pacing) asks the game-specific
 // code something. In LAS Recomp these were Link's Awakening features (warp, mirror mode, widescreen camera, pots, pets,
-// save editor, extra flags); for DOAX3 they answer "nothing special" until a DOAX3 counterpart is written.
+// save editor, extra flags); for MUA3 they answer "nothing special" until a MUA3 counterpart is written.
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -15,7 +15,7 @@ uint64_t game_camera_zone(void) { return 0; }
 int cheats_link_health(int *max) { if (max) *max = 0; return -1; }
 
 // ---- version, for the shader caches' tag (runtime/nvn/shader_prep.c)
-const char *larecomp_version(void) { return "doax3-dev"; }
+const char *larecomp_version(void) { return "mua3-dev"; }
 
 // ---- input (runtime/hle/input.c)
 bool mirror_input(void) { return false; }

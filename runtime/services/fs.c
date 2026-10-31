@@ -21,6 +21,7 @@
 #include "../game_addresses.h"
 #include "../platform.h"
 #include "../romfs_build.h"
+#include "../romfs_nca.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
 #define FS_PATH_EXISTS MAKE_RESULT(2, 2)
@@ -30,12 +31,13 @@
 const char *g_save_dir = "save";
 
 // ------------------------------------------------------------------ the base RomFS image
-// The game reads its data as one raw RomFS image. It's served from the player's romfs/ folder: the header and tables
-// laid out in memory (runtime/romfs_build.c), each file's bytes read from its own file, the gaps between files zeros -
-// no image file on disk, so the game data isn't kept twice. A romfs.bin from an older version is used only when the
-// folder isn't there.
+// The game reads its data as one raw RomFS image. It's read in place from the player's NSPs when romfs.src describes
+// them (runtime/romfs_nca.c, the update patched over the base game), else served from the player's romfs/ folder: the
+// header and tables laid out in memory (runtime/romfs_build.c), each file's bytes read from its own file, the gaps
+// between files zeros - no image file on disk, so the game data isn't kept twice. A romfs.bin from an older version is
+// used only when neither is there.
 static RomfsLayout g_base;
-static bool g_base_open;
+static bool g_base_open, g_base_nca;
 static int g_base_fd = -1;  // (an older version's romfs.bin)
 static pthread_mutex_t g_base_lock = PTHREAD_MUTEX_INITIALIZER;
 #define BASE_FDS 32  // files kept open (macOS allows 256 open files by default)
@@ -55,6 +57,7 @@ static int base_file_fd(int i) {  // (g_base_lock held)
 }
 
 static uint64_t base_size(void) {
+    if (g_base_nca) return romfs_nca_size();
     if (g_base_fd >= 0) {
         struct stat sb;
         fstat(g_base_fd, &sb);
@@ -65,6 +68,7 @@ static uint64_t base_size(void) {
 
 // n bytes of the base image at off (past its end: zeros)
 static ssize_t base_pread(void *dst_, uint64_t n, uint64_t off) {
+    if (g_base_nca) return romfs_nca_pread(dst_, n, off);
     plat_os_write((uint64_t)(uintptr_t)dst_, n);
     if (g_base_fd >= 0) return pread(g_base_fd, dst_, n, (off_t)off);
     uint8_t *dst = dst_;
@@ -104,6 +108,8 @@ static void base_close(void) {
     for (int k = 0; k < BASE_FDS; k++) if (g_base_fds[k].fd > 0) close(g_base_fds[k].fd);
     memset(g_base_fds, 0, sizeof g_base_fds);
     romfs_layout_free(&g_base);
+    if (g_base_nca) romfs_nca_close();
+    g_base_nca = false;
     if (g_base_fd >= 0) close(g_base_fd);
     g_base_fd = -1;
     g_base_open = false;
@@ -113,7 +119,10 @@ static void base_open(void) {
     if (g_base_open) return;
     char path[1100], why[256] = "";
     struct stat sb;  // (the extracted romfs folder: the game's own files under it)
-    if (stat(g_romfs_dir, &sb) == 0 && S_ISDIR(sb.st_mode) && romfs_layout(g_romfs_dir, &g_base, why, sizeof why)) {
+    snprintf(path, sizeof path, "%s.src", g_romfs_dir);  // (the NSPs, as tools/nsp_extract.py found them)
+    if (stat(path, &sb) == 0 && romfs_nca_open(path, why, sizeof why)) {
+        g_base_nca = true;
+    } else if (stat(g_romfs_dir, &sb) == 0 && S_ISDIR(sb.st_mode) && romfs_layout(g_romfs_dir, &g_base, why, sizeof why)) {
         LOG("[fs] romfs: %d files served from %s\n", g_base.nfiles, g_romfs_dir);
     } else {
         snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // (an older version's image)
@@ -571,6 +580,51 @@ static Service *open_romfs_storage(void) {
     Storage *st = calloc(1, sizeof *st);
     st->size = base_size();
     return service_new("IStorage(romfs)", storage, st);
+}
+
+// ------------------------------------------------------------------ add-on content: <game>/aoc/<id>.romfs
+// (tools/nsp_extract.py --dlc: each add-on's RomFS image as it is; MUA3's Expansion Pass holds one empty file)
+bool aoc_image_path(uint64_t id, char *out, size_t n) {
+    size_t dl = g_romfs_dir ? strlen(g_romfs_dir) : 0;
+    if (dl < 6 || strcmp(g_romfs_dir + dl - 6, "/romfs")) return false;
+    snprintf(out, n, "%.*s/aoc/%016llx.romfs", (int)(dl - 6), g_romfs_dir, (unsigned long long)id);
+    struct stat sb;
+    return stat(out, &sb) == 0 && S_ISREG(sb.st_mode);
+}
+
+typedef struct { int fd; uint64_t size; } FileStorage;
+
+static void file_storage(Service *s, IpcReq *req, IpcResp *resp) {
+    FileStorage *st = s->state;
+    switch (req->cmd) {
+    case 0: {  // Read(offset, size) -> B buffer (past the end: zeros)
+        uint64_t off = IN(uint64_t, 0), size = IN(uint64_t, 8);
+        IpcBuf *b = out_buf(req, 0);
+        if (!b) { resp->result = MAKE_RESULT(2, 6001); break; }
+        if (size > b->size) size = b->size;
+        uint8_t *dst = (uint8_t *)(uintptr_t)b->addr;
+        plat_os_write(b->addr, size);
+        ssize_t r = off < st->size ? pread(st->fd, dst, size, (off_t)off) : 0;
+        if (r < 0) r = 0;
+        if ((uint64_t)r < size) memset(dst + r, 0, size - r);
+        break;
+    }
+    case 4: OUT(uint64_t, 0) = st->size; resp_size(resp, 8); break;  // GetSize
+    default: LOG("[fs] %s cmd %u (ok)\n", s->name, req->cmd);
+    }
+}
+
+static Service *open_aoc_storage(uint64_t id) {
+    char path[1200];
+    if (!aoc_image_path(id, path, sizeof path)) return NULL;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+    FileStorage *st = calloc(1, sizeof *st);
+    struct stat sb;
+    fstat(fd, &sb);
+    st->fd = fd, st->size = (uint64_t)sb.st_size;
+    LOG("[fs] add-on content %016llx: %s\n", (unsigned long long)id, path);
+    return service_new("IStorage(aoc)", file_storage, st);
 }
 
 // ------------------------------------------------------------------ host-directory filesystem
@@ -1118,10 +1172,16 @@ SERVICE("fsp-srv", fsp_srv) {
         break;
     }
     case 200: ipc_return_object(resp, open_romfs_storage()); break;  // OpenDataStorageByCurrentProcess
-    case 202:  // OpenDataStorageByDataId (system data archives)
-        LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", IN(uint64_t, 8));
-        resp->result = MAKE_RESULT(2, 1001);
+    case 202: {  // OpenDataStorageByDataId (add-on content the player has; no system data archives)
+        uint64_t id = IN(uint64_t, 8);
+        Service *aoc = open_aoc_storage(id);
+        if (aoc) ipc_return_object(resp, aoc);
+        else {
+            LOG("[fs] OpenDataStorageByDataId %llx (not available)\n", (unsigned long long)id);
+            resp->result = MAKE_RESULT(2, 1001);
+        }
         break;
+    }
     case 1005: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;  // GetGlobalAccessLogMode
     case 1003: case 1004: case 1006: break;
     case 1011: memset(resp->data, 0, 0x10); resp_size(resp, 0x10); break;

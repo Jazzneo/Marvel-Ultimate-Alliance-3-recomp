@@ -1,4 +1,4 @@
-// Randomizer seeds: LAS Recomp's feature, not part of DOAX3 Recomp. These keep the shared code's "no seed" path.
+// Randomizer seeds: LAS Recomp's feature, not part of MUA3 Recomp. These keep the shared code's "no seed" path.
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>

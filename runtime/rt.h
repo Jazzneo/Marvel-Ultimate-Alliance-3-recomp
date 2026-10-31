@@ -31,8 +31,9 @@ static inline void __attribute__((format(printf, 1, 2))) rt_log(const char *fmt,
 #define GUEST_LO     0x7000000000ull
 #define GUEST_HI     0x7320000000ull
 #define MAIN_BASE    0x7000000000ull
-#define SDK_BASE     0x7004000000ull
-#define GLSLC_BASE   0x7005000000ull   // exefs/subsdk0: NVIDIA glslc (runtime GLSL -> NVN shader compiler)
+#define SDK_BASE     0x7006000000ull   // (main is 0x4fc1000 bytes in MUA3)
+#define GLSLC_BASE   0x7007000000ull   // NVIDIA glslc (runtime GLSL -> NVN shader compiler)
+#define GLSLC_NSO    "subsdk1"         // (MUA3: subsdk0 is multimedia, not loaded)
 #define HLE_BASE     0x7080000000ull   // fake addresses for host-implemented functions
 #define HLE_SIZE     0x0000100000ull
 #define TLS_BASE     0x7090000000ull

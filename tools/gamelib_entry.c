@@ -9,7 +9,7 @@ MODULE(glslc)
 #undef MODULE
 #define MODULE(n) {#n, n##_fn_addrs, n##_fn_ptrs, &n##_fn_count}
 
-GAMELIB_EXPORT const GameLibTables *doaxgame_tables(void) {
+GAMELIB_EXPORT const GameLibTables *mua3game_tables(void) {
     static const GameLibTables t = {GAMELIB_ABI, GAMELIB_ID, 3, {MODULE(game), MODULE(sdk), MODULE(glslc)}};
     return &t;
 }
