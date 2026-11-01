@@ -1256,6 +1256,34 @@ static void quick_exit_handler(void) {
 #endif
 }
 
+// The window mode (settings: fullscreen, exclusive_fullscreen, window_width / height; the launcher sets them): windowed;
+// borderless fullscreen (the desktop's mode); or exclusive fullscreen, the display set to the mode closest to the
+// chosen size (the desktop's if none) at that size's highest refresh rate. Also the menu's Fullscreen toggle.
+void ui_apply_window_mode(SDL_Window *w) {
+    if (!w) return;
+    if (!g_settings.fullscreen) {
+        SDL_SetWindowFullscreen(w, false);
+        return;
+    }
+    if (g_settings.exclusive_fullscreen) {
+        SDL_DisplayID d = SDL_GetDisplayForWindow(w);
+        const SDL_DisplayMode *desk = SDL_GetDesktopDisplayMode(d);
+        int fw = g_settings.window_width > 0 ? g_settings.window_width : desk ? desk->w : 1920;
+        int fh = g_settings.window_height > 0 ? g_settings.window_height : desk ? desk->h : 1080;
+        SDL_DisplayMode mode;
+        if (SDL_GetClosestFullscreenDisplayMode(d, fw, fh, 0.0f, false, &mode)) {  // (refresh 0: the highest)
+            SDL_SetWindowFullscreenMode(w, &mode);
+            LOG("[window] exclusive fullscreen %dx%d @ %.0f Hz\n", mode.w, mode.h, mode.refresh_rate);
+        } else {
+            SDL_SetWindowFullscreenMode(w, NULL);
+            LOG("[window] no display mode near %dx%d: borderless fullscreen (%s)\n", fw, fh, SDL_GetError());
+        }
+    } else {
+        SDL_SetWindowFullscreenMode(w, NULL);
+    }
+    SDL_SetWindowFullscreen(w, true);
+}
+
 void ui_window_init(void) {
     if (window) return;
     atexit(quick_exit_handler);
@@ -1264,6 +1292,8 @@ void ui_window_init(void) {
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     input_load_user_mappings();
     int win_w = 1280, win_h = 720;
+    if (g_settings.window_width >= 320 && g_settings.window_height >= 180 && !g_settings.fullscreen)
+        win_w = g_settings.window_width, win_h = g_settings.window_height;  // (windowed at the chosen size)
     if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
     SDL_WindowFlags wflags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (getenv("LARECOMP_HIDDEN")) wflags |= SDL_WINDOW_HIDDEN;
@@ -1274,11 +1304,11 @@ void ui_window_init(void) {
                                             getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
         if (scripted) SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     }
-    window = SDL_CreateWindow("LAS Recomp", win_w, win_h, wflags);
+    window = SDL_CreateWindow("Marvel Ultimate Alliance 3 Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
-    // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
-    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
+    // the window mode applies from the start (not only once the game runs); test windows stay windows
+    if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) ui_apply_window_mode(window);
     create_instance();
     if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
     pick_device();

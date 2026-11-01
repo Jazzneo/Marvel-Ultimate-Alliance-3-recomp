@@ -235,6 +235,56 @@ emissive screens). The cause:
   `LARECOMP_DEBUG_FRAME`: every non-state command of the debug frame), `LARECOMP_LOG_DEVICE_INTEGER=1`,
   `LARECOMP_DUMP_GS=1` (the first dropped geometry shader's code to `build/gs_code.bin`).
 
+## Frame rate, launcher, window modes, icon (2026-11-01)
+
+### Frame rate setting (30 / 60 / 120)
+
+- **How the game paces itself:** MUA3 never asks for the vsync event. At the title `present_pace` (interval 2) holds it
+  at 30; in levels its own limiter (f_7000839000) sleeps until frame start + 1 / its target rate (30.0 at
+  `0x70045a7158 + 0x98`, a global frame object; its logic frame count at + 0x68).
+- **Its time step:** `dt = max(measured, step)` capped at 1/30 s, where `step` is 1/60 s for its frame interval 1 and
+  1/30 s for 2 (a table at 0x70019f33d8; the interval at `[[0x7002188a00] + 0x60]`, 2 in MUA3). Just running faster
+  therefore played at double speed (every frame still advanced 1/30 s). A separate step count (`0x1e566c` in the
+  world, forced to 2) only sets the present interval and a render-thread wait timeout.
+- **The setting** (`frame_rate` in larecomp.ini; the launcher; "Frame rate" on the menu's Display tab;
+  `LARECOMP_FPS=30/60/120` overrides; an old `fps60 = 1` reads as 60): the display period is half the frame time
+  (`g_vsync_period`, runtime/hle/vi.c: `present_pace` keeps its interval-2 grid), and every frame
+  (game_hooks.c `game_frame_rate`) the limiter target becomes the rate, the frame interval 1 above 30, and at 120
+  the interval-1 step 1/120 s.
+- **Measured** (`LARECOMP_LOG_GAMETIME=1`: game time per 4 s of real time, from the logic frames): 3.90 s at 30
+  (117 frames), 3.88 s at 60 (228), 3.78-3.86 s at 120 (~105 logic frames a second, ~65-100 shown: see Known gaps).
+  Six minutes of play at 60 had no crash.
+- **Render thread costs cut on the way:** CPU-written linear textures (six 1024x1024 RGBA8, two a frame) are copied
+  to their images by the GPU from the imported heap and not hashed when the OS's write tracking says they changed;
+  buffer textures (the light lists) are copied the same way instead of hashed. Texture time 525 -> 58 ms per 2 s,
+  render thread ~10-12 -> ~5 ms a frame.
+- **Test switches:** `LARECOMP_FPS_AT=<frame>:<hz>` changes the display rate at a presented frame (a frame-scripted
+  route still gets through the loads); `LARECOMP_LOG_SLEEPS=1` (the game's sleeps and timed waits of 5 ms or more),
+  `LARECOMP_LOG_LIMITER=1`, `LARECOMP_LOG_DYNTEX=1`.
+
+### Launcher (`launcher/launcher.cpp`, `build/mua3launcher.exe`)
+
+- SDL 3 + Dear ImGui (SDL renderer). Window mode (windowed / borderless fullscreen / exclusive fullscreen),
+  resolution (the window's size, or the display mode at its highest refresh rate for exclusive), render resolution,
+  upscaler, anti-aliasing, aspect ratio, frame rate, the FPS counter; Play saves and starts `mua3recomp.exe` from the
+  data folder (the one with `extracted/`, next to the launcher or one up) as `tools/run.sh` does.
+- It changes only its own keys in larecomp.ini and keeps every other line.
+- Test switches: `MUA3_LAUNCHER_SHOT=<file.bmp>` (save its window, quit), `MUA3_LAUNCHER_PLAY=1` (press Play).
+
+### Window modes (runtime/nvn/vulkan/device.c `ui_apply_window_mode`)
+
+- New keys `exclusive_fullscreen`, `window_width`, `window_height` next to `fullscreen`: windowed at the chosen size;
+  borderless (the desktop's mode); exclusive (the display mode closest to the chosen size, the desktop's if none, at
+  that size's highest refresh rate). F11 / Alt+Enter still toggle fullscreen, in the chosen fullscreen kind.
+- Checked: windowed 1600x900 from the launcher's settings. The fullscreen kinds weren't run here (they take the
+  display over); they're SDL's own calls.
+
+### Icon
+
+- `tools/make_icon.py` makes `build/icon.png` (the window's and the launcher's, loaded at run time) and
+  `build/icon.ico` (in both executables, `windres`) from `extracted/control/icon_*.dat`: the game's own home-menu icon
+  from your dump, never committed. The window's title is "Marvel Ultimate Alliance 3 Recomp".
+
 ## Status (MUA3, 2026-11-01)
 
 - **Runs at 29-30 fps at 1920x1080** (i9-10900, RTX 3080 Ti) from the title through save creation, the opening movie
@@ -254,25 +304,9 @@ emissive screens). The cause:
   lane masks were 0). The tiled light culling shader (`cs 72b4b35500`) takes 1.5-10 ms; its light lists are read by
   the lighting pass from the guest heap in place, which is worth moving to device-local memory. The lane masks
   assume 32-lane subgroups (NVIDIA); AMD's wave64 would need subgroup size control.
-- **60 fps:** done as a setting (below); not on by default yet. Higher rates would need the game's dt cap (1/30 s
-  minimum step logic) and limiter looked at again.
-
-### 60 FPS setting
-
-- **How the game paces itself:** MUA3 never asks for the vsync event. At the title `present_pace` (interval 2) holds it
-  at 30; in levels its own limiter (f_7000839000) sleeps until frame start + 1/30 s (`SleepThread` from 0x70008395b4).
-- **Its time step:** `dt = max(measured, step)` capped at 1/30 s, where `step` is 1/60 s for its frame interval 1 and
-  1/30 s for 2 (`[[0x7002188a00] + 0x60]`, 2 in MUA3). Just running faster therefore played at double speed (every
-  frame still advanced 1/30 s).
-- **The setting** (`fps60` in larecomp.ini, "60 FPS" on the menu's Display tab; `LARECOMP_FPS=30` / `60` overrides):
-  the display period becomes 8.33 ms (`g_vsync_period`, runtime/hle/vi.c), so `present_pace`'s interval-2 grid is
-  16.7 ms; the limiter's sleep is shortened by the difference (runtime/kernel.c); and the game's frame interval is
-  set to 1 every frame (game_hooks.c `game_fps60_frame`), so dt is the measured time.
-- **Measured** (`LARECOMP_LOG_GAMETIME=1`: game time per 4 s of real time): 3.90 s at 30 fps (117 frames) and at
-  ~57 fps (228 frames, title and level). The level's busy time is 5-15 ms a frame (game thread ~6-11, render thread
-  ~7-12, GPU ~6-9 on the RTX 3080 Ti); a six-minute play run at 60 fps had no crash.
-- **Test switches:** `LARECOMP_FPS_AT=<frame>:<hz>` changes the display rate at a presented frame (a frame-scripted
-  route still gets through the loads); `LARECOMP_LOG_SLEEPS=1` logs the game's sleeps and timed waits of 5 ms or more.
+- **Frame rate:** 30 / 60 / 120 are a setting (above). At 120 the RTX 3080 Ti shows ~70-100 fps in the first level
+  while other GPU work runs alongside: the GPU (~8-11 ms a frame, the tiled light culling 3.3 ms of it: its 8.4 MB
+  light lists go through the dispatch's device-local copy and back every frame) is the limit now.
 - **Build time:** `generated/glslc/glslc_188.c` alone took over 15 minutes at -O1; splitting that chunk would cut the
   first build a lot.
 - From DOAX3, still open: `game_in_play` and level hooks (slow-frame classification treats every frame as a load),

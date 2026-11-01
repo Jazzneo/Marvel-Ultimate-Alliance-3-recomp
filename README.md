@@ -33,13 +33,16 @@ the runtime reads the data in place from your NSPs (`runtime/romfs_nca.c`).
 
 1. MSYS2 with UCRT64 clang, make, SDL3, FFmpeg, Vulkan, shaderc (see LAS Recomp's `tools/setup_windows.ps1`), and
    Python 3.12 with a venv: `py -V:3.12 -m venv .venv` and
-   `.venv/Scripts/python -m pip install unicorn==2.1.4 capstone==5.0.9 lz4==4.4.5 pycryptodome==3.23.0`.
+   `.venv/Scripts/python -m pip install unicorn==2.1.4 capstone==5.0.9 lz4==4.4.5 pycryptodome==3.23.0 pillow==13.0.0`
+   (Pillow: the window and executable icon, made from the game's own icon in your dump at build time).
 2. Extract your game (in Git Bash, `export MSYS_NO_PATHCONV=1` first):
    `.venv/Scripts/python -I tools/nsp_extract.py "<base>.nsp" "<your prod.keys>" extracted --update "<update>.nsp"
    --dlc "<expansion pass>.nsp"`. Keep the NSPs where they are: the game data is read from them.
 3. In Git Bash with `export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"`:
    `make gen` (recompile the game code into `generated/`, ~3 minutes), then `make -j16` (~40 minutes the first time).
-4. Run: `tools/run.sh` (log: `mua3.log`).
+4. Run: `build/mua3launcher.exe` (the launcher: window mode, resolution, render resolution, upscaler,
+   anti-aliasing, aspect ratio and frame rate 30 / 60 / 120, then Play), or `tools/run.sh` (log: `mua3.log`).
+   The settings are in `larecomp.ini` next to `extracted/`; the in-game menu (F1 or Esc) changes most of them too.
 
 ## Credits
 

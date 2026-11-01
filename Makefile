@@ -46,6 +46,9 @@ GAMELIB_ID := $(shell (cat $(GAMELIB_SRCS); echo '$(GENFLAGS)') | sha256sum | cu
 GAMELIB_BUILD := $(shell od -An -tx1 -j64 -N8 extracted/exefs/main 2>/dev/null | tr -d ' \n' | tr a-f A-F)
 GAMELIB_FULL_ID := $(GAMELIB_ID)-$(or $(GAMELIB_BUILD),unknown)
 
+ICON_SRC := $(firstword $(wildcard extracted/control/icon_AmericanEnglish.dat extracted/control/icon_*.dat))
+ICON_RES := $(if $(ICON_SRC),$(B)/icon_res.o)
+
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 
 # ---- the game code: generated C from the game's own NSOs (never committed)
@@ -103,14 +106,35 @@ $(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ)
+$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(ICON_RES)
 	@mkdir -p $(dir $@)link
 	$(CXX) -o $(dir $@)link/$(notdir $@) $^ $(LDFLAGS)
 	mv -f $(dir $@)link/$(notdir $@) $@
+
+# ---- the icon (the window's and the executables'): from the game's own icon in extracted/control (your dump), when
+# it's there - nothing of the game is committed
+$(B)/icon.png $(B)/icon.ico &: $(ICON_SRC) tools/make_icon.py
+	@mkdir -p $(B)
+	$(PY) -I tools/make_icon.py extracted/control $(B)
+$(B)/icon_res.o: $(B)/icon.ico
+	printf '1 ICON "%s"\n' "$(B)/icon.ico" > $(B)/icon.rc
+	windres -i $(B)/icon.rc -o $@
+
+# ---- the launcher (launcher/launcher.cpp): the display and frame rate settings, then the game
+LAUNCHER := $(B)/mua3launcher.exe
+LAUNCHER_IMGUI := $(B)/imgui/imgui.o $(B)/imgui/imgui_draw.o $(B)/imgui/imgui_tables.o $(B)/imgui/imgui_widgets.o \
+                  $(B)/imgui/imgui_impl_sdl3.o $(B)/imgui/imgui_impl_sdlrenderer3.o
+$(B)/launcher/launcher.o: launcher/launcher.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+$(LAUNCHER): $(B)/launcher/launcher.o $(LAUNCHER_IMGUI) $(ICON_RES) $(if $(ICON_SRC),$(B)/icon.png)
+	$(CXX) -o $@ $(filter %.o,$^) -fuse-ld=lld -mwindows -lSDL3
+launcher: $(LAUNCHER)
+all: $(LAUNCHER)
 
 runtime-objs: $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ)
 
 clean:
 	rm -rf $(B)
 
-.PHONY: all gen runtime-objs clean
+.PHONY: all gen runtime-objs clean launcher

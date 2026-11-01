@@ -21,7 +21,8 @@
 #include "imgui_impl_metal.h"
 #else
 #include "imgui_impl_vulkan.h"
-extern "C" void vi_apply_fps(void);  // runtime/hle/vi.c: the 60 FPS setting
+extern "C" void ui_apply_window_mode(SDL_Window *w);  // runtime/nvn/vulkan/device.c
+extern "C" void vi_apply_fps(void);  // runtime/hle/vi.c: the frame rate setting
 extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
 // runtime/nvn/vulkan/device.c: the command buffer ImGui records into (a secondary one the recorder thread executes in
 // the window image's commands, or that buffer itself after the recorder caught up), then handed back
@@ -275,7 +276,7 @@ void menu_apply_window_requests(void *win) {
     static bool first = true;
     if (first || g_want_fullscreen_apply.exchange(false)) {
         first = false;
-        SDL_SetWindowFullscreen(w, g_settings.fullscreen);
+        ui_apply_window_mode(w);  // (windowed / borderless / exclusive: runtime/nvn/vulkan/device.c)
     }
     if (uint32_t r = __atomic_exchange_n(&g_window_resize_request, 0u, __ATOMIC_RELAXED))
         SDL_SetWindowSize(w, (int)(r >> 16), (int)(r & 0xffff));
