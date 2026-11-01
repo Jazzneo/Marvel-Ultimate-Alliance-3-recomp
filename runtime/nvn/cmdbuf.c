@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "nvn.h"
+#define ONCE(what) do { static int n_; if (!n_++) LOG("[nvn] %s: first call, not implemented%c", what, 10); } while (0)
 
 #define JUMP_RESERVE (sizeof(CmdRec) + 8)
 
@@ -39,7 +40,7 @@ NVN(nvnCommandBufferAddCommandMemory) {
     cb->size = size;
     cb->used = 0;
 }
-NVN(nvnCommandBufferAddControlMemory) { (void)c; }
+NVN(nvnCommandBufferAddControlMemory) { (void)c; ONCE("AddControlMemory"); }
 NVN(nvnCommandBufferGetCommandMemorySize) { RET(cb_of(A(0))->size); }
 NVN(nvnCommandBufferGetCommandMemoryUsed) { RET(cb_of(A(0))->used); }
 NVN(nvnCommandBufferGetCommandMemoryFree) {
@@ -53,7 +54,7 @@ NVN(nvnCommandBufferSetMemoryCallback) { cb_of(A(0))->callback = A(1); }
 NVN(nvnCommandBufferGetMemoryCallback) { RET(cb_of(A(0))->callback); }
 NVN(nvnCommandBufferSetMemoryCallbackData) { cb_of(A(0))->callback_data = A(1); }
 NVN(nvnCommandBufferGetMemoryCallbackData) { RET(cb_of(A(0))->callback_data); }
-NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; }
+NVN(nvnCommandBufferSetCommandMemoryCallbackEnabled) { (void)c; ONCE("SetCommandMemoryCallbackEnabled"); }
 
 // Reserve a record. May call back into the guest for more memory, so callers snapshot their
 // arguments first.
@@ -88,6 +89,7 @@ NVN(nvnCommandBufferEndRecording) {
     RET(cb->start);
 }
 NVN(nvnCommandBufferIsRecording) { RET(cb_of(A(0))->recording); }
+
 
 // ---- generic recorders
 typedef struct { uint64_t x[8]; float f[4]; } Snap;
@@ -172,11 +174,11 @@ NVN(nvnCommandBufferBindSeparateTexture) {
     r->x[0] = s.x[1]; r->x[1] = s.x[2]; r->x[2] = 1;
     memcpy(r->extra, &s.x[3], 8);
 }
-NVN(nvnCommandBufferBindSeparateSamplers) { (void)c; }
-NVN(nvnCommandBufferBindSeparateSampler) { (void)c; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; }
-NVN(nvnCommandBufferBindCoverageModulationTable) { (void)c; }
+NVN(nvnCommandBufferBindSeparateSamplers) { (void)c; ONCE("BindSeparateSamplers"); }
+NVN(nvnCommandBufferBindSeparateSampler) { (void)c; ONCE("BindSeparateSampler"); }
+NVN(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; ONCE("BindTransformFeedbackBuffers"); }
+NVN(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; ONCE("BindTransformFeedbackBuffer"); }
+NVN(nvnCommandBufferBindCoverageModulationTable) { (void)c; ONCE("BindCoverageModulationTable"); }
 
 NVN(nvnCommandBufferSetTexturePool) {
     Snap s = snap(c);
@@ -260,25 +262,25 @@ PLAIN(nvnCommandBufferSetLineWidth, CMD_SET_LINE_WIDTH)
 PLAIN(nvnCommandBufferSetPointSize, CMD_SET_POINT_SIZE)
 PLAIN(nvnCommandBufferSetSampleMask, CMD_SET_SAMPLE_MASK)
 PLAIN(nvnCommandBufferSetRenderEnable, CMD_SET_RENDER_ENABLE)
-NVN(nvnCommandBufferSetRenderEnableConditional) { (void)c; }
-NVN(nvnCommandBufferSetDepthClamp) { (void)c; }
-NVN(nvnCommandBufferSetRasterizerDiscard) { (void)c; }
-NVN(nvnCommandBufferSetConservativeRasterEnable) { (void)c; }
-NVN(nvnCommandBufferSetConservativeRasterDilate) { (void)c; }
-NVN(nvnCommandBufferSetSubpixelPrecisionBias) { (void)c; }
-NVN(nvnCommandBufferSetViewportSwizzles) { (void)c; }
-NVN(nvnCommandBufferSetStencilCullCriteria) { (void)c; }
-NVN(nvnCommandBufferSetColorReductionEnable) { (void)c; }
-NVN(nvnCommandBufferSetColorReductionThresholds) { (void)c; }
-NVN(nvnCommandBufferSetTiledCacheAction) { (void)c; }
-NVN(nvnCommandBufferSetTiledCacheTileSize) { (void)c; }
-NVN(nvnCommandBufferSetShaderScratchMemory) { (void)c; }
-NVN(nvnCommandBufferSetPatchSize) { (void)c; }
-NVN(nvnCommandBufferSetInnerTessellationLevels) { (void)c; }
-NVN(nvnCommandBufferSetOuterTessellationLevels) { (void)c; }
-NVN(nvnCommandBufferSetProgramSubroutines) { (void)c; }
-NVN(nvnCommandBufferSaveZCullData) { (void)c; }
-NVN(nvnCommandBufferRestoreZCullData) { (void)c; }
+NVN(nvnCommandBufferSetRenderEnableConditional) { (void)c; ONCE("SetRenderEnableConditional"); }
+NVN(nvnCommandBufferSetDepthClamp) { (void)c; ONCE("SetDepthClamp"); }
+NVN(nvnCommandBufferSetRasterizerDiscard) { (void)c; ONCE("SetRasterizerDiscard"); }
+NVN(nvnCommandBufferSetConservativeRasterEnable) { (void)c; ONCE("SetConservativeRasterEnable"); }
+NVN(nvnCommandBufferSetConservativeRasterDilate) { (void)c; ONCE("SetConservativeRasterDilate"); }
+NVN(nvnCommandBufferSetSubpixelPrecisionBias) { (void)c; ONCE("SetSubpixelPrecisionBias"); }
+NVN(nvnCommandBufferSetViewportSwizzles) { (void)c; ONCE("SetViewportSwizzles"); }
+NVN(nvnCommandBufferSetStencilCullCriteria) { (void)c; ONCE("SetStencilCullCriteria"); }
+NVN(nvnCommandBufferSetColorReductionEnable) { (void)c; ONCE("SetColorReductionEnable"); }
+NVN(nvnCommandBufferSetColorReductionThresholds) { (void)c; ONCE("SetColorReductionThresholds"); }
+NVN(nvnCommandBufferSetTiledCacheAction) { (void)c; ONCE("SetTiledCacheAction"); }
+NVN(nvnCommandBufferSetTiledCacheTileSize) { (void)c; ONCE("SetTiledCacheTileSize"); }
+NVN(nvnCommandBufferSetShaderScratchMemory) { (void)c; ONCE("SetShaderScratchMemory"); }
+NVN(nvnCommandBufferSetPatchSize) { (void)c; ONCE("SetPatchSize"); }
+NVN(nvnCommandBufferSetInnerTessellationLevels) { (void)c; ONCE("SetInnerTessellationLevels"); }
+NVN(nvnCommandBufferSetOuterTessellationLevels) { (void)c; ONCE("SetOuterTessellationLevels"); }
+NVN(nvnCommandBufferSetProgramSubroutines) { (void)c; ONCE("SetProgramSubroutines"); }
+NVN(nvnCommandBufferSaveZCullData) { (void)c; ONCE("SaveZCullData"); }
+NVN(nvnCommandBufferRestoreZCullData) { (void)c; ONCE("RestoreZCullData"); }
 
 static uint64_t copy_row_stride, copy_image_stride;
 RT_ON_RESET(cmdbuf_reset) { copy_row_stride = copy_image_stride = 0; }
@@ -333,7 +335,7 @@ NVN(nvnCommandBufferDiscardColor) {
     r->x[2] = 0xF;  // all channels
     r->x[5] = 0;    // float clear
 }
-NVN(nvnCommandBufferDiscardDepthStencil) { (void)c; }
+NVN(nvnCommandBufferDiscardDepthStencil) { (void)c; ONCE("DiscardDepthStencil"); }
 
 // ---- draws (all integer arguments fit in x1..x7)
 NVN(nvnCommandBufferDrawArrays) { Snap s = snap(c); CmdRec *r = record(c, CMD_DRAW_ARRAYS, 0, &s); r->x[3] = 0; r->x[4] = 1; }
@@ -371,16 +373,16 @@ NVN(nvnCommandBufferDrawElementsBaseVertex) {
 NVN(nvnCommandBufferDrawElementsInstanced) { trace_draw(c, c->x[3]); Snap s = snap(c); record(c, CMD_DRAW_ELEMENTS, 0, &s); }
 PLAIN(nvnCommandBufferDrawArraysIndirect, CMD_DRAW_ARRAYS_INDIRECT)
 PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
-NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { (void)c; }
-NVN(nvnCommandBufferMultiDrawElementsIndirectCount) { (void)c; }
-NVN(nvnCommandBufferDrawTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferDrawTexture) { (void)c; }
+NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { ONCE("MultiDrawArraysIndirectCount (not drawn)"); }
+NVN(nvnCommandBufferMultiDrawElementsIndirectCount) { ONCE("MultiDrawElementsIndirectCount (not drawn)"); }
+NVN(nvnCommandBufferDrawTransformFeedback) { ONCE("DrawTransformFeedback"); }
+NVN(nvnCommandBufferDrawTexture) { ONCE("DrawTexture"); }
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)
-PLAIN(nvnCommandBufferDispatchComputeIndirect, CMD_DISPATCH_INDIRECT)
-NVN(nvnCommandBufferBeginTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferEndTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferPauseTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferResumeTransformFeedback) { (void)c; }
+NVN(nvnCommandBufferDispatchComputeIndirect) { ONCE("DispatchComputeIndirect"); Snap s = snap(c); record(c, CMD_DISPATCH_INDIRECT, 0, &s); }
+NVN(nvnCommandBufferBeginTransformFeedback) { (void)c; ONCE("BeginTransformFeedback"); }
+NVN(nvnCommandBufferEndTransformFeedback) { (void)c; ONCE("EndTransformFeedback"); }
+NVN(nvnCommandBufferPauseTransformFeedback) { (void)c; ONCE("PauseTransformFeedback"); }
+NVN(nvnCommandBufferResumeTransformFeedback) { (void)c; ONCE("ResumeTransformFeedback"); }
 
 // ---- copies
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRef;
@@ -428,9 +430,9 @@ NVN(nvnCommandBufferDownsampleTextureView) {
     CmdRec *r = record(c, CMD_DOWNSAMPLE, sizeof t, &s);
     memcpy(r->extra, t, sizeof t);
 }
-NVN(nvnCommandBufferTiledDownsample) { (void)c; }
-NVN(nvnCommandBufferTiledDownsampleTextureView) { (void)c; }
-NVN(nvnCommandBufferResolveDepthBuffer) { (void)c; }
+NVN(nvnCommandBufferTiledDownsample) { (void)c; ONCE("TiledDownsample"); }
+NVN(nvnCommandBufferTiledDownsampleTextureView) { (void)c; ONCE("TiledDownsampleTextureView"); }
+NVN(nvnCommandBufferResolveDepthBuffer) { (void)c; ONCE("ResolveDepthBuffer"); }
 // UpdateUniformBuffer(cmd, buffer, size, offset, dataSize, data)
 NVN(nvnCommandBufferUpdateUniformBuffer) { record_copy(c, CMD_UPDATE_UNIFORM_BUFFER, 5, (uint32_t)A(4)); }
 
@@ -445,8 +447,8 @@ PLAIN(nvnCommandBufferBarrier, CMD_BARRIER)
 PLAIN(nvnCommandBufferSignalEvent, CMD_SIGNAL_EVENT)
 PLAIN(nvnCommandBufferWaitEvent, CMD_WAIT_EVENT)
 PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
-NVN(nvnCommandBufferReportValue) { (void)c; }
-NVN(nvnCommandBufferResetCounter) { (void)c; }
+NVN(nvnCommandBufferReportValue) { (void)c; ONCE("ReportValue"); }
+NVN(nvnCommandBufferResetCounter) { (void)c; ONCE("ResetCounter"); }
 NVN(nvnCommandBufferCallCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
 NVN(nvnCommandBufferCopyCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
 NVN(nvnCommandBufferInsertDebugMarker) { (void)c; }

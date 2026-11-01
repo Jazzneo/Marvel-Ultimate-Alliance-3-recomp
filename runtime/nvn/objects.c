@@ -290,7 +290,11 @@ NVN(nvnMemoryPoolFlushMappedRange) {
     backend_pool_written(p->storage + A(1), A(2));
 }
 NVN(nvnMemoryPoolInvalidateMappedRange) { (void)c; }
-NVN(nvnMemoryPoolMapVirtual) { RET(1); }
+NVN(nvnMemoryPoolMapVirtual) {
+    static int n;
+    if (n++ < 4) LOG("[nvn] MemoryPoolMapVirtual: %llu mappings, not mapped (virtual pools aren't modelled)\n", (unsigned long long)A(1));
+    RET(1);
+}
 
 // ================================================================== buffers
 // Builder: device@0 pool@8 offset@0x10 size@0x18. Buffer: address@0 pool@8 offset@0x10 size@0x18 id@0x20

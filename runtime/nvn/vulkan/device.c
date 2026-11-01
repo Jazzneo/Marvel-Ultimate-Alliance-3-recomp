@@ -1127,6 +1127,14 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (last_fps_time > 0)
             LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s%s)\n", now, (unsigned long long)frame,
                 frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats(), pp_text());
+        extern volatile const uint32_t *g_ind_probe;  // (exec.c, LARECOMP_LOG_INDIRECT: an indirect draw's count)
+        if (g_ind_probe) {
+            int nz = 0, first = -1;
+            for (int i = 0; i < 512; i++) if (g_ind_probe[i * 12]) { nz++; if (first < 0) first = i; }
+            LOG("[nvn] indirect probe %p: %d of 512 records with a count (first %d: %u %u %u %u %u)\n", (const void *)g_ind_probe, nz, first,
+                first < 0 ? 0 : g_ind_probe[first * 12], first < 0 ? 0 : g_ind_probe[first * 12 + 1], first < 0 ? 0 : g_ind_probe[first * 12 + 2],
+                first < 0 ? 0 : g_ind_probe[first * 12 + 3], first < 0 ? 0 : g_ind_probe[first * 12 + 4]);
+        }
         max_gap = 0;
         frames = 0;
         last_fps_time = now;

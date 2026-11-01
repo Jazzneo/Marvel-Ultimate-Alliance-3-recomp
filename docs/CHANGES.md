@@ -145,6 +145,8 @@ both games are Koei Tecmo's engine) and was retargeted at MUA3 on the `mua3` bra
 
 ## Test routes (7443143, `tools/route.sh`)
 
+DOAX3's routes, since replaced by MUA3's (see "MUA3: into the first level").
+
 `tools/route.sh <route> [secs] [shot frames]` runs the game with scripted input; shots go to `build/frames/`.
 
 | Route | Save | Path | Time |
@@ -184,19 +186,63 @@ Inherited from LAS Recomp and used here:
 | `LARECOMP_SHADER_PREP=0` | no shader preparation at startup |
 | `LARECOMP_SYNC_SHADERS=1` | compile on first use, blocking, instead of skipping draws for a few frames |
 
-## Status (MUA3, 2026-10-31)
+## MUA3: into the first level (2026-11-01)
 
-- **Runs at 30 fps at 1920x1080** (i9-10900, RTX 3080 Ti) through the title, the update history, save slot and
-  difficulty selection. No crash in runs of up to 5.5 minutes.
-- **Checked correct:** title, update history pages, save slot list and its dialog, difficulty selection.
-- **Not reached yet:** the opening, gameplay. The frame-scripted input (`LARECOMP_INPUT`) drifts between runs here
-  (load times differ), so it lands on other screens; reaching gameplay needs a person playing or a sturdier route.
+- **Saving:** the game's saves never reached disk: the stub `flags_ext_save_written` hook (`runtime/hle/game_hooks.c`)
+  returned false, which `fs.c` takes as a failed write of any file named `*savedata*` (MUA3's `savedatainfo`).
+- **Shader translator:**
+  - LEA / LEA.HI (64-bit address math);
+  - CAL / RET: a short subroutine without control flow of its own is inlined at the call, others go through a return
+    stack in the `switch (pc)` machine (the big effect compute programs have ~3000 calls);
+  - RED (global reduction, through the ATOM path);
+  - DMUL / DADD / DFMA / DSETP: GLSL doubles in register pairs (`shaderFloat64` is enabled).
+- **BRX jump tables in programs over 64 KB:** the table reader took any constant offset of 0x10000 or more for "no
+  constants known", so the effect compute programs (~90 KB) had every instruction as a `switch` case (9000 cases) and
+  the driver never finished building them; the startup preparation waited on them forever (no window). Now 214
+  cases, built in ~7 s once, cached after.
+- **Movies from the romfs image:** with the game data read in place from the NSPs there is no host file for FFmpeg
+  to open. `romfs_file_find` / `romfs_image_read` (`fs.c`) give the movie player the file's range in the image, read
+  through an FFmpeg custom reader. The opening (EV_0101_01.mp4, H.264 + AAC, ~3.5 minutes) plays; + pauses it and X
+  skips it.
+- **Indirect draws:** `DrawArraysIndirect` / `DrawElementsIndirect` were recorded and then dropped. They now draw
+  with their arguments read on the GPU from the imported heap (`vkCmdDraw(Indexed)Indirect`, the index buffer bound in
+  place without the vertex cache). `LARECOMP_VK_INDIRECT_CPU=1` reads them on the CPU at replay instead.
+- **Also replayed now:** `ClearBuffer` and `SignalEvent` (both were dropped). The no-op command buffer stubs log
+  their first call ("first call, not implemented").
+- **`tools/route.sh`:** the MUA3 routes `menus` and `kree` (fresh save to the first level, the Kree ship, in ~130 s).
+
+### The dark first level (open)
+
+The level runs at 29-30 fps with no skipped draws, but characters are black silhouettes and the scene has no surface
+detail: only fog, the spotlight's volume and emissive screens show. What was found:
+
+- The frame is a depth prepass (456 direct draws, a fragment shader that writes nothing), a G-buffer pass with five
+  colour targets, then lighting. The G-buffer pass gets **one direct draw**; every other object is drawn there as
+  `SetRenderEnableConditional(mode 1, record)` + `DrawElementsIndirect(record + 0x10)` + `SetRenderEnable(1)`
+  (game `f_70004360f0` -> `f_7000840e70`; the direct path `f_70012305f0` is taken only for parts without an
+  occlusion slot).
+- The records (a 0x18000-byte buffer, 48 bytes each: a 16-byte conditional pair `{0, 1, 0, 0}`, the arguments
+  `{count 0, instances 1, 0, 0, 0}`, padding) are written once by the CPU at load (`f_7000445440`, seen with a write
+  watch) and **never again**: no CPU write, and none of the 13 compute shaders, no graphics shader, copy, clear,
+  inline update, event, counter report or transform feedback touches them. The counts stay 0, so the G-buffer stays
+  black. On the console something fills those counts on the GPU; it hasn't been identified. Next: what the game
+  does with the occlusion slots (`[x21 + 0x10]` entries in `f_70004360f0`) and whether a GPU occlusion mechanism NVN
+  offers (counters, ZCull, conditional render) is what it relies on.
+- Tools for it, all off by default: `LARECOMP_LOG_INDIRECT=1` (arguments at replay, a record scan every 2 s),
+  `LARECOMP_WATCH_INDIRECT=1` (write-protect the first record's page and log each writer's module and stack),
+  `LARECOMP_DEBUG_OPS=1` (with `LARECOMP_DEBUG_FRAME`: every non-state command of the debug frame).
+
+## Status (MUA3, 2026-11-01)
+
+- **Runs at 29-30 fps at 1920x1080** (i9-10900, RTX 3080 Ti) from the title through save creation, the opening movie
+  and into the first level (the Kree ship), with saving working. No crash in runs of up to 5.5 minutes.
+- **Checked correct:** title, update history, save slot list and dialog, difficulty, save creation, the opening movie,
+  loading tips, level HUD and dialogue.
+- **Wrong:** the level's lighting and surfaces (see above).
 
 ## Known gaps and next steps
 
-- **Gameplay not reached yet:** scripted input gets through title, patch notes (Y closes them), save slot, difficulty
-  and save creation ("Save data has been created. A: START GAME"); what follows hasn't been seen.
-  Route: `300:PLUS, 1300:Y, 1500:PLUS, 1750:A, 2100:UP, 2160:A` (frames shift with load times).
+- **The dark level:** above.
 - **Frame rate:** the title and menus hold 29-30 fps when nothing else uses the GPU. The 3-15 fps stretches seen in
   testing lined up with other recomps running on the same GPU (~60 ms GPU time slices in `LARECOMP_GPUPROF_SLOW`
   profiles), so check for them before trusting a measurement.

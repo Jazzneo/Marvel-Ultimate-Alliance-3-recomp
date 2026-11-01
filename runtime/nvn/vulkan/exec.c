@@ -661,7 +661,8 @@ static int new_chunk(uint64_t size) {
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
                              .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
     static bool sysmem;  // (the device-local window ran out: system memory from then on)
@@ -3607,7 +3608,7 @@ static VkResult host_import_ptr(void *host, uint64_t size, VkBuffer *out_buf, Vk
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                                      (bda ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0)};
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | (bda ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0)};
     VkBuffer buf;
     r = vkCreateBuffer(g_vk.dev, &bi, NULL, &buf);
     if (r != VK_SUCCESS) { vkFreeMemory(g_vk.dev, mem, NULL); return r; }
@@ -3803,7 +3804,8 @@ static bool guest_heap_dmabuf(void) {
                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
+                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT};
     const char *pe = getenv("LARECOMP_VK_HEAP_PLACED");
     bool placed = g_vk.map_placed && (!pe || atoi(pe));
     if (!placed && !g_vk.dmabuf) { LOG("[vk] heap as driver memory: no way to map it here\n"); return false; }
@@ -4843,6 +4845,7 @@ void vc_flush(void) {
 // device-local cache above, else read in place - no per-draw copy, no index scan for the copy size. The game fences its
 // CPU writes as on the Switch. Falls back to copies outside the heap or without the import; LARECOMP_VK_COPY_VERTICES=1
 // forces copies.
+static struct { bool on; VkBuffer buf; VkDeviceSize off; } g_ind;  // an indirect draw in progress (draw_indirect)
 static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {  // kind: 0 vertex, 1 index (bind_note)
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
@@ -4853,14 +4856,14 @@ static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, 
         if (!size || o + size > HEAP_MAX) return false;
         int k = (int)(o >> gc_shift);
         if ((int)((o + size - 1) >> gc_shift) != k || !gmem_covers(o, size)) return false;  // (crossing chunks: copied)
-        if (vcache_lookup(addr, size, buf, off)) return true;
+        if (kind != 2 && !(g_ind.on && kind == 1) && vcache_lookup(addr, size, buf, off)) return true;
         *buf = gc[k].buf;
         *off = o - ((uint64_t)k << gc_shift);
         return true;
     }
     if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
     if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
-    if (vcache_lookup(addr, size, buf, off)) return true;
+    if (kind != 2 && !(g_ind.on && kind == 1) && vcache_lookup(addr, size, buf, off)) return true;
     *buf = gmem_buf;
     *off = addr - HEAP_BASE;
     return true;
@@ -5730,6 +5733,70 @@ static void prep_check(const PipeKey *k, uint64_t vh, uint64_t fh, const ShaderR
 }
 
 static void draw_(CmdRec *r, bool indexed);
+static void draw(CmdRec *r, bool indexed);
+// DrawArraysIndirect / DrawElementsIndirect (GL's argument layouts): the game's compute shaders write the counts
+// (GPU culling), so the draw reads its arguments on the GPU from the imported heap, in place (a dispatch's copy-back
+// ends in a full barrier: gfast_finish). The index buffer is bound in place too, its size unknown: the largest range
+// from its start that the heap import covers, up to 4 MB. Without the import (or LARECOMP_VK_INDIRECT_CPU=1) the
+// arguments are read on the CPU when the draw is replayed instead - as of the last copy back: up to a frame late.
+volatile const uint32_t *g_ind_probe;
+static void draw_indirect(CmdRec *r, bool indexed) {
+    const uint32_t *a = (const uint32_t *)(uintptr_t)r->x[indexed ? 3 : 1];
+    if (!a) return;
+    static int nlog = -1;  // LARECOMP_LOG_INDIRECT=1: arguments as the CPU sees them when the draw is replayed
+    if (nlog < 0) nlog = getenv("LARECOMP_LOG_INDIRECT") ? 0 : 1 << 30;
+    if (nlog < 1 << 30) {
+        static uint64_t n, nz;
+        n++, nz += a[0] != 0;
+        if (nlog < 8 || (a[0] && nlog < 24)) {
+            nlog++;
+            LOG("[nvn] indirect %s at %llx (index %llx): %u %u %u %u %u\n", indexed ? "elements" : "arrays",
+                (unsigned long long)(uintptr_t)a, (unsigned long long)(indexed ? r->x[2] : 0), a[0], a[1], a[2], a[3], indexed ? a[4] : 0);
+        }
+        if (n % 20000 == 0) LOG("[nvn] indirect: %llu draws, %llu with a count\n", (unsigned long long)n, (unsigned long long)nz);
+        if (indexed && !g_ind_probe) {
+            g_ind_probe = a;
+            extern void plat_watch_page(uint64_t addr);
+            if (getenv("LARECOMP_WATCH_INDIRECT")) plat_watch_page((uint64_t)(uintptr_t)a);
+        }
+    }
+    static int cpu = -1;
+    if (cpu < 0) cpu = getenv("LARECOMP_VK_INDIRECT_CPU") != NULL;
+    VkBuffer abuf;
+    VkDeviceSize aoff;
+    uint32_t isz = r->x[1] == 0 ? 1 : r->x[1] == 1 ? 2 : 4;
+    uint64_t span = 0;  // (the index range bound)
+    bool gpu = !cpu && (!indexed || isz > 1) && guest_direct(2, r->x[indexed ? 3 : 1], indexed ? 20 : 16, &abuf, &aoff);
+    if (gpu && indexed)
+        for (span = 4u << 20; span >= 4096; span >>= 1) {
+            VkBuffer b;
+            VkDeviceSize o;
+            g_ind.on = true;
+            bool ok = guest_direct(1, r->x[2], span, &b, &o);
+            g_ind.on = false;
+            if (ok) break;
+        }
+    if (gpu && (!indexed || span >= 4096)) {
+        CmdRec t = *r;
+        if (indexed) t.x[2] = span / isz, t.x[3] = r->x[2], t.x[4] = 0, t.x[5] = 0, t.x[6] = 1;
+        else t.x[1] = 0, t.x[2] = 1u << 16, t.x[3] = 0, t.x[4] = 1;
+        g_ind.on = true, g_ind.buf = abuf, g_ind.off = aoff;
+        draw(&t, indexed);
+        g_ind.on = false;
+        return;
+    }
+    if (!a[0] || !a[1]) return;  // (no vertices or no instances; draw() takes 0 instances as 1)
+    CmdRec t = *r;
+    if (indexed) {  // count, instances, first index, base vertex, base instance
+        uint32_t isz = r->x[1] == 0 ? 1 : r->x[1] == 1 ? 2 : 4;
+        t.x[2] = a[0], t.x[3] = r->x[2] + (uint64_t)a[2] * isz, t.x[4] = (uint64_t)(int64_t)(int32_t)a[3];
+        t.x[5] = a[4], t.x[6] = a[1];
+    } else {  // count, instances, first, base instance
+        t.x[1] = a[2], t.x[2] = a[0], t.x[3] = a[3], t.x[4] = a[1];
+    }
+    draw(&t, indexed);
+}
+
 static void draw(CmdRec *r, bool indexed) {
     note_observable();
     PROF_T0();
@@ -6247,6 +6314,11 @@ static void draw_(CmdRec *r, bool indexed) {
             uint32_t rdyn[MAX_BIND], nrdyn = 0;
             VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii, rdyn, &nrdyn);
             rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, nrdyn, nrdyn ? rdyn : NULL);
+        }
+        if (g_ind.on) {  // (draw_indirect: the arguments on the GPU; a mode drawn through expanded indices isn't)
+            if (native && !indexed) rec_CmdDrawIndirect(cb, g_ind.buf, g_ind.off, 1, 16);
+            else if (native) rec_CmdDrawIndexedIndirect(cb, g_ind.buf, g_ind.off, 1, 20);
+            break;
         }
         if (!use_index) rec_CmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else rec_CmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
@@ -7256,6 +7328,10 @@ static void exec_list(uint64_t handle, int depth) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         void *x = r->extra;
         if (r->op < CMD_COUNT) op_counts[r->op]++;
+        if (g_debug_frame && r->op >= CMD_SET_RENDER_ENABLE && r->op != CMD_DRAW_ARRAYS && r->op != CMD_DRAW_ELEMENTS &&
+            getenv("LARECOMP_DEBUG_OPS"))  // (the debug frame's commands other than state and direct draws)
+            LOG("[op] %u x %llx %llx %llx %llx\n", r->op, (unsigned long long)r->x[0], (unsigned long long)r->x[1],
+                (unsigned long long)r->x[2], (unsigned long long)r->x[3]);
         switch (r->op) {
         case CMD_END: return;
         case CMD_JUMP: p = r->x[0]; continue;
@@ -7412,7 +7488,14 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_DISPATCH: dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]); break;
         case CMD_DRAW_ARRAYS: draw(r, false); break;
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
+        case CMD_DRAW_ARRAYS_INDIRECT: draw_indirect(r, false); break;
+        case CMD_DRAW_ELEMENTS_INDIRECT: draw_indirect(r, true); break;
         case CMD_UPDATE_UNIFORM_BUFFER:
+            if (g_ind_probe && (uint64_t)(uintptr_t)g_ind_probe + 0x100000 - (r->x[0] + r->x[2]) < 0x200000) {
+                static int nlog;
+                if (nlog++ < 16) LOG("[nvn] UpdateUniformBuffer %llx + %llx size %llx (near the indirect probe)\n", (unsigned long long)r->x[0],
+                                     (unsigned long long)r->x[2], (unsigned long long)r->x[3]);
+            }
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
             guest_copy_flush();  // (cbuf copies shared within the submission are stale now)
             break;
@@ -7431,8 +7514,7 @@ static void exec_list(uint64_t handle, int depth) {
             uint64_t *out = (uint64_t *)(uintptr_t)r->x[1];
             uint32_t type = (uint32_t)r->x[0];
             static uint32_t seen;
-            if (type < 32 && !(seen & (1u << type))) { seen |= 1u << type; LOG("[nvn] ReportCounter type %u\n", type); }
-            int mode = vk_counter_mode();
+            if (type < 32 && !(seen & (1u << type))) { seen |= 1u << type; LOG("[nvn] ReportCounter type %u\n", type); }            int mode = vk_counter_mode();
             static uint64_t frame_seen = ~0ull, frame_ts;
             extern uint64_t vk_frame_counter(void);
             if (mode == 1 && vk_frame_counter() != frame_seen) { frame_seen = vk_frame_counter(); frame_ts = ns_to_gpu_ticks(plat_now_ns()); }
@@ -7475,6 +7557,26 @@ static void exec_list(uint64_t handle, int depth) {
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);
             break;
+        case CMD_SIGNAL_EVENT: {  // SignalEvent(event, mode, location, flags, value): mode 0 writes the value, 1 adds it
+            uint32_t *ev = (uint32_t *)(uintptr_t)*(uint64_t *)(uintptr_t)r->x[0];  // (Event@0: its storage address)
+            static int nlog;
+            if (nlog++ < 12) LOG("[nvn] SignalEvent %p mode %llu location %llu flags %llx value %llu (was %u)\n", (void *)ev, (unsigned long long)r->x[1],
+                                 (unsigned long long)r->x[2], (unsigned long long)r->x[3], (unsigned long long)r->x[4], ev ? *ev : 0);
+            wait_why = "event signal";
+            renderer_flush();
+            if (ev) *ev = r->x[1] == 1 ? *ev + (uint32_t)r->x[4] : (uint32_t)r->x[4];
+            break;
+        }
+        case CMD_CLEAR_BUFFER: {  // ClearBuffer(dst, size, value): the 32-bit value over the range (as the copies: CPU)
+            static int nlog = -1;
+            if (nlog < 0) nlog = getenv("LARECOMP_LOG_INDIRECT") ? 0 : 1 << 30;
+            if (nlog < 16) { nlog++; LOG("[nvn] ClearBuffer %llx size %llx value %llx\n", (unsigned long long)r->x[0], (unsigned long long)r->x[1], (unsigned long long)r->x[2]); }
+            wait_why = "buffer clear";
+            renderer_flush();
+            uint32_t *d = (uint32_t *)(uintptr_t)r->x[0];
+            for (uint64_t i = 0; d && i < r->x[1] / 4; i++) d[i] = (uint32_t)r->x[2];
+            break;
+        }
         default: break;
         }
         p += r->size;

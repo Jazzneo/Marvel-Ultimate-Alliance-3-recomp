@@ -36,10 +36,58 @@ static bool lazy_commit(uint64_t a) {
 
 static bool g_report_crashes;
 
+// (debug) plat_watch_page: CPU writes to a page are logged (the writing module + offset and the call stack, the first
+// 24 writes), each let through by unprotecting the page for one instruction (single step)
+static volatile uint64_t g_watch_page;
+static volatile int g_watch_n;
+void plat_watch_page(uint64_t addr) {
+    DWORD old;
+    g_watch_page = addr & ~0xFFFull;
+    if (!VirtualProtect((void *)(uintptr_t)g_watch_page, 0x1000, PAGE_READONLY, &old)) g_watch_page = 0;
+    fprintf(stderr, "[watch] page %llx %s\n", (unsigned long long)(addr & ~0xFFFull), g_watch_page ? "read-only until written" : "not protected");
+}
+static void watch_where(char *out, size_t n, uint64_t a) {
+    HMODULE m = NULL;
+    char path[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)(uintptr_t)a, &m) && m)
+        GetModuleFileNameA(m, path, sizeof path);
+    const char *base = strrchr(path, '\\');
+    snprintf(out, n, "%s+%llx", base ? base + 1 : path, (unsigned long long)(a - (uint64_t)(uintptr_t)m));
+}
+
 static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && g_watch_page) {  // (the watched write is done: protect again)
+        DWORD old;
+        VirtualProtect((void *)(uintptr_t)g_watch_page, 0x1000, PAGE_READONLY, &old);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
     uint64_t fa = er->ExceptionInformation[1];
+    if (g_watch_page && (fa & ~0xFFFull) == g_watch_page && er->ExceptionInformation[0] == 1) {
+        DWORD old;
+        void *bt[24];
+        USHORT nb = RtlCaptureStackBackTrace(0, 24, bt, NULL);
+        uint64_t key = 0;
+        for (USHORT i = 4; i < nb && i < 10; i++) key = key * 31 + (uint64_t)(uintptr_t)bt[i];
+        static uint64_t keys[64];
+        static int nkeys;
+        bool seen = false;
+        for (int k = 0; k < nkeys; k++) seen |= keys[k] == key;
+        if (!seen && nkeys < 64) {  // (one line per writer: a memcpy faults on every byte)
+            keys[nkeys++] = key;
+            char w[300];
+            watch_where(w, sizeof w, ep->ContextRecord->Rip);
+            fprintf(stderr, "[watch] write to %llx from %s, thread %lu, stack:", (unsigned long long)fa, w, GetCurrentThreadId());
+            for (USHORT i = 0; i < nb; i++) { watch_where(w, sizeof w, (uint64_t)(uintptr_t)bt[i]); fprintf(stderr, " %s", w); }
+            fprintf(stderr, "\n");
+        }
+        g_watch_n++;
+        VirtualProtect((void *)(uintptr_t)g_watch_page, 0x1000, PAGE_READWRITE, &old);
+        if (g_watch_n < 2000000) ep->ContextRecord->EFlags |= 0x100;  // (single step, then protected again)
+        else g_watch_page = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     // (not for an execute fault: on a read-write page, retrying it would fault again forever)
     if (er->ExceptionInformation[0] != EXCEPTION_EXECUTE_FAULT && lazy_commit(fa)) return EXCEPTION_CONTINUE_EXECUTION;
     if (g_report_crashes && rt_fault_watch(fa, ep->ContextRecord->Rip)) return EXCEPTION_CONTINUE_EXECUTION;

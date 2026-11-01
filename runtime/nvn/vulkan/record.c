@@ -799,6 +799,28 @@ void rec_CmdDrawIndexed(VkCommandBuffer cb, uint32_t count, uint32_t inst, uint3
     ENQ_END();
 }
 
+CMD_ARGS(CmdDrawIndirect, VkBuffer buf; VkDeviceSize off; uint32_t n, stride; bool indexed;)
+static void CmdDrawIndirect_run(const void *p) {
+    const CmdDrawIndirectArgs *a = p;
+    if (draw_dropped()) return;
+    if (a->indexed) vkCmdDrawIndexedIndirect(a->cb, a->buf, a->off, a->n, a->stride);
+    else vkCmdDrawIndirect(a->cb, a->buf, a->off, a->n, a->stride);
+}
+static void rec_draw_indirect(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize off, uint32_t n, uint32_t stride, bool indexed) {
+    CmdDrawIndirectArgs a = {cb, buf, off, n, stride, indexed};
+    if (on <= 0) { CmdDrawIndirect_run(&a); return; }
+    ENQ_T0();
+    *(CmdDrawIndirectArgs *)push(CmdDrawIndirect_run, sizeof a, 0) = a;
+    commit();
+    ENQ_END();
+}
+void rec_CmdDrawIndirect(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize off, uint32_t n, uint32_t stride) {
+    rec_draw_indirect(cb, buf, off, n, stride, false);
+}
+void rec_CmdDrawIndexedIndirect(VkCommandBuffer cb, VkBuffer buf, VkDeviceSize off, uint32_t n, uint32_t stride) {
+    rec_draw_indirect(cb, buf, off, n, stride, true);
+}
+
 // ---- arrays: the packet's arguments, then the array(s) after them
 CMD_ARGS(CmdBindVertexBuffers, uint32_t first, n;)  // then VkBuffer[n], VkDeviceSize[n]
 static void CmdBindVertexBuffers_run(const void *p) {

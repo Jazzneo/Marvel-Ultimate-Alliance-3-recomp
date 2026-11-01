@@ -2,7 +2,7 @@
 # Scripted test routes (LARECOMP_INPUT button presses by frame), for checking the game's scenes and screenshots.
 # Usage: tools/route.sh <route> [seconds] [screenshot frames, comma separated]
 #   menus   fresh save: title, patch notes, save slot, difficulty -> "Save data has been created"     ~110 s
-#   kree    fresh save: as menus, then the opening movie and the first level (the Kree ship)          ~190 s
+#   kree    fresh save: as menus, then the opening movie (skipped) and the first level (the Kree ship) ~170 s
 # Fresh-save routes move save/ aside first and put it back afterwards (the game autosaves).
 # Frames are presented frames (30 fps); load times shift them a little between runs. Confirmation dialogs start on
 # CANCEL: LEFT then A.
@@ -17,8 +17,8 @@ menus)
     in="$menus"
     : "${secs:=110}" ;;
 kree)
-    in="$menus$(seq_presses A 3000 150 6000)"
-    : "${secs:=190}" ;;
+    in="$menus,3000:A:8,3300:PLUS:8,3400:X:8$(seq_presses A 3700 150 6000)"  # (the opening: + pauses, X skips)
+    : "${secs:=170}" ;;
 *)
     sed -n '2,8p' "$0"; exit 1 ;;
 esac
