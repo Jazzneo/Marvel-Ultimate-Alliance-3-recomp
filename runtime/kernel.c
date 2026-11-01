@@ -712,9 +712,12 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x0B: {  // SleepThread (in slices of at most 50 ms: a reboot doesn't wait out a long sleep)
         int64_t ns = (int64_t)x[0];
         extern bool game_frame_limiter_sleep(uint64_t lr);
-        extern volatile uint64_t g_vsync_period;  // (runtime/hle/vi.c)
-        if (g_vsync_period < 16666667 && game_frame_limiter_sleep(c->x[30]))  // (the game's 30 fps limiter, faster display)
-            ns -= (int64_t)(33333333 - 2 * g_vsync_period);
+        if (game_frame_limiter_sleep(c->x[30]) && getenv("LARECOMP_LOG_LIMITER")) {  // (debug) is x19 the frame object?
+            static int n;
+            if (n++ < 5) LOG("[limiter] sleep %.2f ms x19 %llx [+0x98] %f [+0x68] %llu\n", ns / 1e6, (unsigned long long)x[19],
+                             (x[19] >> 32 == 0x72 || x[19] >> 32 == 0x70) ? *(float *)(uintptr_t)(x[19] + 0x98) : 0.0f,
+                             (x[19] >> 32 == 0x72 || x[19] >> 32 == 0x70) ? (unsigned long long)*(uint64_t *)(uintptr_t)(x[19] + 0x68) : 0ull);
+        }
         if (ns <= 0) { sched_yield(); break; }
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;

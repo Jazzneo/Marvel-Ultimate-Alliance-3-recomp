@@ -842,8 +842,9 @@ static void present_pace(int interval) {
         static bool applied;
         if (!applied) applied = true, vi_apply_fps();
         extern volatile uint64_t g_vsync_period;
-        extern void game_fps60_frame(bool on);  // (game_hooks.c: the game's frame interval, its time step)
-        game_fps60_frame(g_vsync_period < 16666667);
+        extern void game_frame_rate(int fps);  // (game_hooks.c: the game's frame interval, its time step)
+        extern int vi_frame_rate(void);
+        game_frame_rate(vi_frame_rate());
         if (at < 0) { const char *e = getenv("LARECOMP_FPS_AT"); at = e ? atol(e) : 0; hz = e && strchr(e, ':') ? atol(strchr(e, ':') + 1) : 0; }
         extern volatile uint64_t g_vsync_period;
         if (at && hz >= 30 && hz <= 480 && ++frames == (uint64_t)at) {

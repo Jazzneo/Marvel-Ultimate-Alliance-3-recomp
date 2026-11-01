@@ -417,9 +417,14 @@ static void tab_display(void) {
         g_want_fullscreen_apply.store(true);
     }
     opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
-    if (opt_toggle("60 FPS", &g_settings.fps60, false, "Runs the game at 60 frames per second instead of 30. The game "
-                   "keeps time by the clock, so it plays at its normal speed. Turn it off if your PC can't keep up.")) {
-        vi_apply_fps();
+    {
+        static const char *const rates[] = {"30", "60", "120"};
+        int ri = g_settings.frame_rate >= 120 ? 2 : g_settings.frame_rate >= 60 ? 1 : 0;
+        if (opt_choice("Frame rate", &ri, rates, 3, 0, "Frames per second. The game keeps time by the clock, so it "
+                       "plays at its normal speed at each; 30 is the original. Pick a lower one if your PC can't keep up.")) {
+            g_settings.frame_rate = ri == 2 ? 120 : ri == 1 ? 60 : 30;
+            vi_apply_fps();
+        }
     }
 
     opt_section("Rendering");

@@ -13,19 +13,24 @@ volatile uint64_t g_vsync_count;  // vsyncs signalled so far (runtime/hle/framep
 volatile uint64_t g_vsync_ns;     // plat_now_ns() of the latest (stored after the count: count >= the vsync it's from)
 uint64_t g_native_window;
 
-// The display's vsync period. MUA3 waits for two vsyncs a frame and keeps game time by the clock, so the 60 FPS
-// setting (fps60; LARECOMP_FPS=30 / 60 overrides it) runs the display at 120 Hz; its own 30 fps frame limiter is
-// shortened to match (runtime/kernel.c, SleepThread). (test) LARECOMP_VSYNC_HZ=<hz>: any rate from the start;
-// LARECOMP_FPS_AT=<frame>:<hz>: that rate from that presented frame on (objects.c: a scripted route gets through the
-// loads at the game's own rate).
+// The display's vsync period. MUA3 waits for two vsyncs a frame (present_pace, interval 2) and keeps game time by the
+// clock, so the frame rate setting (frame_rate 30 / 60 / 120; LARECOMP_FPS overrides it) runs the display at twice
+// that; its own 30 fps frame limiter is shortened to match (runtime/kernel.c, SleepThread) and its time step follows
+// (game_hooks.c game_frame_rate). (test) LARECOMP_VSYNC_HZ=<hz>: any rate from the start; LARECOMP_FPS_AT=<frame>:<hz>:
+// that rate from that presented frame on (objects.c: a scripted route gets through the loads at the game's own rate).
 volatile uint64_t g_vsync_period = 16666667;
+int vi_frame_rate(void) {  // 30, 60 or 120: what the display period gives (two vsyncs a frame)
+    uint64_t p = g_vsync_period;
+    return p <= 4200000 ? 120 : p <= 8400000 ? 60 : 30;
+}
 void vi_apply_fps(void) {
     const char *e = getenv("LARECOMP_FPS");
-    bool fps60 = e ? atoi(e) >= 60 : g_settings.fps60;
-    g_vsync_period = fps60 ? 8333333 : 16666667;
+    int fps = e ? atoi(e) : g_settings.frame_rate;
+    fps = fps >= 120 ? 120 : fps >= 60 ? 60 : 30;
+    g_vsync_period = 500000000ull / (uint64_t)fps;
     const char *hz = getenv("LARECOMP_VSYNC_HZ");
     if (hz && atoi(hz) >= 30 && atoi(hz) <= 480) g_vsync_period = 1000000000ull / (uint64_t)atoi(hz);
-    LOG("[vi] display at %.0f Hz (%s)\n", 1e9 / (double)g_vsync_period, fps60 ? "60 fps" : "30 fps");
+    LOG("[vi] display at %.0f Hz (%d fps)\n", 1e9 / (double)g_vsync_period, vi_frame_rate());
 }
 static void *vsync_thread(void *arg) {
     (void)arg;

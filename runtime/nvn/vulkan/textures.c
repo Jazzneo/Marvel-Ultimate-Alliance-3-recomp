@@ -628,6 +628,19 @@ static void upload_buffer_texture(NvnTexture *t, TexBackend *b) {
     uint32_t w = t->width < b->width ? t->width : b->width;
     uint64_t total = (uint64_t)w * fi->bpb;
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
+    {   // copied by the GPU straight from the imported guest heap, every frame it's used: no hash of it (MUA3's light
+        // lists, 8.4 MB, are written by a compute shader - not the CPU)
+        extern bool vk_guest_buffer(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off);
+        VkBuffer gb;
+        VkDeviceSize go;
+        if (b->format == fmt_of(t->format).vf && fi->bpb != 3 && t->addr % fi->bpb == 0 && vk_guest_buffer(t->addr, total, &gb, &go) &&
+            go % fi->bpb == 0) {
+            b->uploaded = true;
+            VkBufferImageCopy rg = {.bufferOffset = go, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, 1, 1}};
+            rec_CmdCopyBufferToImage(vk_upload_cmd(), gb, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+            return;
+        }
+    }
     uint64_t h = hash_full(mem, total);
     if (b->uploaded && h == b->data_hash) return;
     b->data_hash = h;
@@ -650,6 +663,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     uint64_t total = tegra_total_size(&t->layout);
     b->checked_frame = frame;
     prof_tex_checks++;
+    if ((t->flags & 0x10) && !b->dynamic && getenv("LARECOMP_LOG_DYNTEX")) {
+        static int n;
+        if (n++ < 20) LOG("[tex] linear (dynamic): %llx %ux%ux%u fmt %#x levels %u %llu bytes\n", (unsigned long long)t->addr,
+                          t->width, t->height, t->depth, t->format, t->layout.levels, (unsigned long long)total);
+    }
     if (t->flags & 0x10) b->dynamic = true;
     if (full_hash_budget_frame != frame) { full_hash_budget_frame = frame; full_hash_budget = 4 << 20; }
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
@@ -666,12 +684,14 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // ~2.4 MB a frame in the overworld). The periodic full hash stays as a safety net. LARECOMP_VK_TEX_WATCH=0: off.
     static int watch = -1;
     if (watch < 0) { const char *e = getenv("LARECOMP_VK_TEX_WATCH"); watch = !e || atoi(e) != 0; }
+    bool written = false;  // (a dynamic texture the CPU wrote since the last check: uploaded without hashing it first)
     if (watch && !always_full) {
         extern int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
         uint32_t now = 0;
         int ch = vk_pages_changed(t->addr, total, b->wgen, &now);
         if (ch >= 0) {
             b->wgen = now;
+            written = ch > 0 && b->dynamic && b->uploaded && !restyle;
             if (!ch && b->uploaded && !restyle) {
                 if (!periodic) { prof_tex_watch_skips++; return; }
                 if (b->dynamic) full_hash_budget -= total;  // (the others took theirs above)
@@ -687,12 +707,17 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
     extern void slow_note_full_hash(void), slow_note_upload(uint64_t bytes);  // (slowframe.h)
     slow_note_full_hash();
-    uint64_t h = fast ? tex_hash_full(mem, total) : hash_full(mem, total);
+    uint64_t h = written ? b->data_hash + 1 : fast ? tex_hash_full(mem, total) : hash_full(mem, total);
     b->full_frame = frame;
     // (the sample is only compared while the texture isn't dynamic, and a dynamic one stays so: none for those)
     if (!fast) b->sample_hash = fnv_sample(mem, total);
     else if (!b->dynamic && !(b->uploaded && h != b->data_hash)) b->sample_hash = tex_hash_sample(mem, total);
     if (b->uploaded && h == b->data_hash && !restyle) return;
+    if (b->uploaded && h != b->data_hash && !b->dynamic && getenv("LARECOMP_LOG_DYNTEX")) {
+        static int n;
+        if (n++ < 20) LOG("[tex] dynamic: %llx %ux%ux%u fmt %#x flags %#x levels %u %llu bytes\n", (unsigned long long)t->addr,
+                          t->width, t->height, t->depth, t->format, t->flags, t->layout.levels, (unsigned long long)total);
+    }
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
     // new contents (the game reused the memory for another image, or the data arrived after the first check): which
     // known texture it is, if any, is decided again before this upload patches it
@@ -730,6 +755,27 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             uint32_t row = l.wb * fi->bpb;
             uint64_t sz = (uint64_t)row * l.hb * l.d;
             bool expand = mf.expand_rgb && fi->bpb == 3;
+            {   // A linear texture the CPU writes (MUA3: six 1024x1024 RGBA8 ones, two a frame): copied to the image by
+                // the GPU straight from the imported guest heap - no hash-sized memcpy into the upload buffer.
+                // LARECOMP_VK_TEX_DIRECT=0: off.
+                static int direct = -1;
+                if (direct < 0) { const char *e = getenv("LARECOMP_VK_TEX_DIRECT"); direct = !e || atoi(e) != 0; }
+                extern bool vk_guest_buffer(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off);
+                const uint64_t src_addr = t->addr + layer * layer_size + l.offset;
+                VkBuffer gb;
+                VkDeviceSize go;
+                if (direct && linear && !expand && b->tp <= 0 && l.d == 1 && fi->bw == 1 && fi->bh == 1 && t->stride &&
+                    t->stride % fi->bpb == 0 && src_addr % fi->bpb == 0 && b->aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+                    l.w <= level_w(b, lv) && l.h <= level_h(b, lv) &&
+                    vk_guest_buffer(src_addr, (uint64_t)t->stride * (l.hb - 1) + row, &gb, &go) && go % fi->bpb == 0) {
+                    VkBufferImageCopy rg = {.bufferOffset = go, .bufferRowLength = t->stride / fi->bpb, .bufferImageHeight = l.hb,
+                                            .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, b->depth > 1 ? 0 : layer, 1},
+                                            .imageExtent = {l.w, b->base_type == VK_IMAGE_VIEW_TYPE_1D || b->base_type == VK_IMAGE_VIEW_TYPE_1D_ARRAY ? 1 : l.h, 1}};
+                    vk_dl_note_upload((void *)b->image, rg.imageExtent.width, rg.imageExtent.height, lv);
+                    rec_CmdCopyBufferToImage(cb, gb, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+                    continue;
+                }
+            }
             uint32_t out_row = expand ? l.wb * 4 : row;
             VkSpan s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
             uint8_t *lin = expand ? malloc(sz) : s.ptr;

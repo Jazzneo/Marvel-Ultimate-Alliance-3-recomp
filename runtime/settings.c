@@ -32,7 +32,7 @@ Settings g_settings = {
     .controller_light = true,
     .menu_confirm = MENU_CONFIRM_CONTROLLER,
     .show_fps = false,
-    .fps60 = false,
+    .frame_rate = 30,
     .inv_keys = true,
     .tracker = true,
     .tracker_filters = -1,
@@ -157,7 +157,8 @@ void settings_load(void) {
         else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
         else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
-        else if (!strcmp(key, "fps60")) g_settings.fps60 = atoi(val) != 0;
+        else if (!strcmp(key, "fps60")) g_settings.frame_rate = atoi(val) ? 60 : 30;  // (the first version's key)
+        else if (!strcmp(key, "frame_rate")) g_settings.frame_rate = atoi(val) >= 120 ? 120 : atoi(val) >= 60 ? 60 : 30;
         else if (!strcmp(key, "resolution")) {  // (auto: never chosen, the GPU's default)
             int n = atoi(val);
             g_settings.res_auto = !strcmp(val, "auto");
@@ -250,7 +251,7 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
-    fprintf(f, "fps60 = %d\n", g_settings.fps60);
+    fprintf(f, "frame_rate = %d\n", g_settings.frame_rate);
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");

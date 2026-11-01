@@ -4886,6 +4886,10 @@ static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, 
     return true;
 }
 
+// Guest memory as a buffer for the GPU to read in place (not through the vertex cache): textures.c, a CPU-written
+// linear texture copied to its image on the GPU.
+bool vk_guest_buffer(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) { return guest_direct(2, addr, size, buf, off); }
+
 static int g_cs_n;  // (compute program table below)
 
 // In-place reboot (device.c backend_reset; GPU idle): drop what is keyed by guest addresses - programs by code
