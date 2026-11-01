@@ -211,38 +211,42 @@ Inherited from LAS Recomp and used here:
   their first call ("first call, not implemented").
 - **`tools/route.sh`:** the MUA3 routes `menus` and `kree` (fresh save to the first level, the Kree ship, in ~130 s).
 
-### The dark first level (open)
+### The dark first level: a geometry shader that was dropped
 
-The level runs at 29-30 fps with no skipped draws, but characters are black silhouettes and the scene has no surface
-detail: only fog, the spotlight's volume and emissive screens show. What was found:
+The level first ran with black character silhouettes and no surface detail (only fog, the spotlight's volume and
+emissive screens). The cause:
 
-- The frame is a depth prepass (456 direct draws, a fragment shader that writes nothing), a G-buffer pass with five
-  colour targets, then lighting. The G-buffer pass gets **one direct draw**; every other object is drawn there as
-  `SetRenderEnableConditional(mode 1, record)` + `DrawElementsIndirect(record + 0x10)` + `SetRenderEnable(1)`
-  (game `f_70004360f0` -> `f_7000840e70`; the direct path `f_70012305f0` is taken only for parts without an
-  occlusion slot).
-- The records (a 0x18000-byte buffer, 48 bytes each: a 16-byte conditional pair `{0, 1, 0, 0}`, the arguments
-  `{count 0, instances 1, 0, 0, 0}`, padding) are written once by the CPU at load (`f_7000445440`, seen with a write
-  watch) and **never again**: no CPU write, and none of the 13 compute shaders, no graphics shader, copy, clear,
-  inline update, event, counter report or transform feedback touches them. The counts stay 0, so the G-buffer stays
-  black. On the console something fills those counts on the GPU; it hasn't been identified. Next: what the game
-  does with the occlusion slots (`[x21 + 0x10]` entries in `f_70004360f0`) and whether a GPU occlusion mechanism NVN
-  offers (counters, ZCull, conditional render) is what it relies on.
-- Tools for it, all off by default: `LARECOMP_LOG_INDIRECT=1` (arguments at replay, a record scan every 2 s),
-  `LARECOMP_WATCH_INDIRECT=1` (write-protect the first record's page and log each writer's module and stack),
-  `LARECOMP_DEBUG_OPS=1` (with `LARECOMP_DEBUG_FRAME`: every non-state command of the debug frame).
+- The frame is a depth-only pass (456 direct draws), a G-buffer pass with five colour targets, then lighting. In the
+  G-buffer pass each object is `SetRenderEnableConditional(mode 1, record)` + `DrawElementsIndirect(record + 0x10)` +
+  `SetRenderEnable(1)` (game `f_70004360f0` -> `f_7000840e70`), and the indirect draws' counts and index buffers
+  were all zero.
+- The depth-only draws' program (vs 72b4b92f00, fs 72b4b94e00) has a **geometry shader** (72b4b94f00) that emits no
+  vertices: per triangle it tests visibility, reserves room with a warp-aggregated atomic add on storage buffer 0
+  (the object's record: the indirect count) and stores the triangle's three vertex indices (`gl_VertexIndex`, the
+  vertex shader's output 0) to storage buffer 1 (the indirect draw's index buffer). The Vulkan backend draws only
+  the vertex and fragment stages, so it was silently dropped.
+- **Fix:** a geometry shader that stores to memory and has no OUT is replayed on the CPU when its draw is replayed:
+  the draw's indices plus base vertex go to storage buffer 1 and the count is set (every triangle kept: no culling),
+  and the draw rasterizes nothing, as the shader emits nothing. `LARECOMP_GS_CULL_EMU=0` turns it off. Programs
+  whose geometry / tessellation stages are dropped are logged once each.
+- Diagnostics added on the way, all off by default: `LARECOMP_LOG_INDIRECT=1` (indirect arguments and indices at
+  replay, a record scan every 2 s), `LARECOMP_WATCH_INDIRECT=1` / `=2` (write-protect / no-access the first record's
+  page and log each writer's / the game's readers' module and stack), `LARECOMP_DEBUG_OPS=1` (with
+  `LARECOMP_DEBUG_FRAME`: every non-state command of the debug frame), `LARECOMP_LOG_DEVICE_INTEGER=1`,
+  `LARECOMP_DUMP_GS=1` (the first dropped geometry shader's code to `build/gs_code.bin`).
 
 ## Status (MUA3, 2026-11-01)
 
 - **Runs at 29-30 fps at 1920x1080** (i9-10900, RTX 3080 Ti) from the title through save creation, the opening movie
-  and into the first level (the Kree ship), with saving working. No crash in runs of up to 5.5 minutes.
+  and the first level (the Kree ship), with saving working. No crash in runs of up to 8.5 minutes, six of them
+  playing (`tools/route.sh play`: moving, attacking, jumping, switching heroes).
 - **Checked correct:** title, update history, save slot list and dialog, difficulty, save creation, the opening movie,
-  loading tips, level HUD and dialogue.
-- **Wrong:** the level's lighting and surfaces (see above).
+  loading tips, the first level's rendering (characters, surfaces, lighting, spotlight, effects), HUD and dialogue.
 
 ## Known gaps and next steps
 
-- **The dark level:** above.
+- **Culling:** the geometry shader's triangle culling isn't done (every triangle is drawn). A compute version of it
+  would cut the G-buffer pass's work if the GPU ever becomes the limit.
 - **Frame rate:** the title and menus hold 29-30 fps when nothing else uses the GPU. The 3-15 fps stretches seen in
   testing lined up with other recomps running on the same GPU (~60 ms GPU time slices in `LARECOMP_GPUPROF_SLOW`
   profiles), so check for them before trusting a measurement.
