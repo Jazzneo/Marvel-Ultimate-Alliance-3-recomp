@@ -3,6 +3,7 @@
 # Usage: tools/route.sh <route> [seconds] [screenshot frames, comma separated]
 #   menus   fresh save: title, patch notes, save slot, difficulty -> "Save data has been created"     ~110 s
 #   kree    fresh save: as menus, then the opening movie (skipped) and the first level (the Kree ship) ~170 s
+#   play    fresh save: as kree, then ~6 minutes of moving, attacking, jumping and switching heroes        ~520 s
 # Fresh-save routes move save/ aside first and put it back afterwards (the game autosaves).
 # Frames are presented frames (30 fps); load times shift them a little between runs. Confirmation dialogs start on
 # CANCEL: LEFT then A.
@@ -19,8 +20,17 @@ menus)
 kree)
     in="$menus,3000:A:8,3300:PLUS:8,3400:X:8$(seq_presses A 3700 150 6000)"  # (the opening: + pauses, X skips)
     : "${secs:=170}" ;;
+play)  # as kree, then ~6 minutes of play: moving in turn in eight directions, attacks, jumps, character switches
+    in="$menus,3000:A:8,3300:PLUS:8,3400:X:8$(seq_presses A 3700 150 4300)"
+    a=0
+    for f in $(seq 4400 160 15000); do
+        in="$in,$f:STICK_$a:90,$((f + 10)):Y:6,$((f + 30)):Y:6,$((f + 50)):X:12,$((f + 80)):A:6,$((f + 110)):B:6"
+        [ $((f % 960)) -lt 160 ] && in="$in,$((f + 140)):RIGHT:6"  # (the next hero)
+        a=$(((a + 135) % 360))
+    done
+    : "${secs:=520}" ;;
 *)
-    sed -n '2,8p' "$0"; exit 1 ;;
+    sed -n '2,9p' "$0"; exit 1 ;;
 esac
 if [ -d save.route-backup ]; then  # (never deleted here: it may be the only copy of a save)
     echo "save.route-backup exists (an interrupted run?): put it back as save/ or remove it first"; exit 1
