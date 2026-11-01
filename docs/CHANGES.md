@@ -254,8 +254,25 @@ emissive screens). The cause:
   lane masks were 0). The tiled light culling shader (`cs 72b4b35500`) takes 1.5-10 ms; its light lists are read by
   the lighting pass from the guest heap in place, which is worth moving to device-local memory. The lane masks
   assume 32-lane subgroups (NVIDIA); AMD's wave64 would need subgroup size control.
-- **60 fps and above:** the game runs at 30 fps (present interval 2). Finding its frame step and whether its logic
-  is tied to the frame rate comes once gameplay runs; any unlock will be a setting that can be turned off.
+- **60 fps:** done as a setting (below); not on by default yet. Higher rates would need the game's dt cap (1/30 s
+  minimum step logic) and limiter looked at again.
+
+### 60 FPS setting
+
+- **How the game paces itself:** MUA3 never asks for the vsync event. At the title `present_pace` (interval 2) holds it
+  at 30; in levels its own limiter (f_7000839000) sleeps until frame start + 1/30 s (`SleepThread` from 0x70008395b4).
+- **Its time step:** `dt = max(measured, step)` capped at 1/30 s, where `step` is 1/60 s for its frame interval 1 and
+  1/30 s for 2 (`[[0x7002188a00] + 0x60]`, 2 in MUA3). Just running faster therefore played at double speed (every
+  frame still advanced 1/30 s).
+- **The setting** (`fps60` in larecomp.ini, "60 FPS" on the menu's Display tab; `LARECOMP_FPS=30` / `60` overrides):
+  the display period becomes 8.33 ms (`g_vsync_period`, runtime/hle/vi.c), so `present_pace`'s interval-2 grid is
+  16.7 ms; the limiter's sleep is shortened by the difference (runtime/kernel.c); and the game's frame interval is
+  set to 1 every frame (game_hooks.c `game_fps60_frame`), so dt is the measured time.
+- **Measured** (`LARECOMP_LOG_GAMETIME=1`: game time per 4 s of real time): 3.90 s at 30 fps (117 frames) and at
+  ~57 fps (228 frames, title and level). The level's busy time is 5-15 ms a frame (game thread ~6-11, render thread
+  ~7-12, GPU ~6-9 on the RTX 3080 Ti); a six-minute play run at 60 fps had no crash.
+- **Test switches:** `LARECOMP_FPS_AT=<frame>:<hz>` changes the display rate at a presented frame (a frame-scripted
+  route still gets through the loads); `LARECOMP_LOG_SLEEPS=1` logs the game's sleeps and timed waits of 5 ms or more.
 - **Build time:** `generated/glslc/glslc_188.c` alone took over 15 minutes at -O1; splitting that chunk would cut the
   first build a lot.
 - From DOAX3, still open: `game_in_play` and level hooks (slow-frame classification treats every frame as a load),

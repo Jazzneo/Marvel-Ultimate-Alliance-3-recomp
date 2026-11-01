@@ -21,6 +21,7 @@
 #include "imgui_impl_metal.h"
 #else
 #include "imgui_impl_vulkan.h"
+extern "C" void vi_apply_fps(void);  // runtime/hle/vi.c: the 60 FPS setting
 extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
 // runtime/nvn/vulkan/device.c: the command buffer ImGui records into (a secondary one the recorder thread executes in
 // the window image's commands, or that buffer itself after the recorder caught up), then handed back
@@ -416,6 +417,10 @@ static void tab_display(void) {
         g_want_fullscreen_apply.store(true);
     }
     opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
+    if (opt_toggle("60 FPS", &g_settings.fps60, false, "Runs the game at 60 frames per second instead of 30. The game "
+                   "keeps time by the clock, so it plays at its normal speed. Turn it off if your PC can't keep up.")) {
+        vi_apply_fps();
+    }
 
     opt_section("Rendering");
     // display order -> RES_* (the ini / enum order predates the menu order)

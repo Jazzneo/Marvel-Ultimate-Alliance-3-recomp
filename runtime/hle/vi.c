@@ -4,6 +4,7 @@
 
 #include "../hle.h"
 #include "../kernel.h"
+#include "../settings.h"
 
 static uint32_t vsync_r, vsync_w;
 static KEvent *vsync_event;
@@ -12,13 +13,29 @@ volatile uint64_t g_vsync_count;  // vsyncs signalled so far (runtime/hle/framep
 volatile uint64_t g_vsync_ns;     // plat_now_ns() of the latest (stored after the count: count >= the vsync it's from)
 uint64_t g_native_window;
 
+// The display's vsync period. MUA3 waits for two vsyncs a frame and keeps game time by the clock, so the 60 FPS
+// setting (fps60; LARECOMP_FPS=30 / 60 overrides it) runs the display at 120 Hz; its own 30 fps frame limiter is
+// shortened to match (runtime/kernel.c, SleepThread). (test) LARECOMP_VSYNC_HZ=<hz>: any rate from the start;
+// LARECOMP_FPS_AT=<frame>:<hz>: that rate from that presented frame on (objects.c: a scripted route gets through the
+// loads at the game's own rate).
+volatile uint64_t g_vsync_period = 16666667;
+void vi_apply_fps(void) {
+    const char *e = getenv("LARECOMP_FPS");
+    bool fps60 = e ? atoi(e) >= 60 : g_settings.fps60;
+    g_vsync_period = fps60 ? 8333333 : 16666667;
+    const char *hz = getenv("LARECOMP_VSYNC_HZ");
+    if (hz && atoi(hz) >= 30 && atoi(hz) <= 480) g_vsync_period = 1000000000ull / (uint64_t)atoi(hz);
+    LOG("[vi] display at %.0f Hz (%s)\n", 1e9 / (double)g_vsync_period, fps60 ? "60 fps" : "30 fps");
+}
 static void *vsync_thread(void *arg) {
     (void)arg;
-    const uint64_t period = 16666667;
+    vi_apply_fps();
+    uint64_t period = g_vsync_period;
     plat_thread_realtime(period);
     plat_thread_perf_core(PLAT_PERF_VSYNC);
     uint64_t next = plat_now_ns();
     for (;;) {
+        period = __atomic_load_n(&g_vsync_period, __ATOMIC_RELAXED);
         next += period;
         plat_sleep_until_ns(next);
         uint64_t now = plat_now_ns();

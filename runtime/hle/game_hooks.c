@@ -14,6 +14,38 @@ const char *game_level_name(void) { return ""; }
 uint64_t game_camera_zone(void) { return 0; }
 int cheats_link_health(int *max) { if (max) *max = 0; return -1; }
 
+// ---- frame rate: the game's own frame limiter (main thread, f_7000839000: sleeps until its frame start + 1 / 30 s,
+// from a target rate at [frame object + 0x98]) calls SleepThread from here (runtime/kernel.c shortens it when the
+// display runs faster than 60 Hz: LARECOMP_FPS_AT, runtime/hle/vi.c)
+bool game_frame_limiter_sleep(uint64_t lr) { return lr == 0x70008395b4ull; }
+
+// The game's time step (f_7000839000): dt = max(measured frame time, its frame interval's step), at most 1/30 s, where
+// the step is 1/60 s for frame interval 1 and 1/30 s for 2 ([[0x7002188a00] + 0x60]; MUA3 runs with 2). So at 60 fps
+// with interval 2 every frame still advanced 1/30 s: double speed. The 60 FPS setting makes the interval 1, every
+// frame (present_pace, runtime/nvn/objects.c): then dt is the measured time at any frame rate up to 60.
+void game_fps60_frame(bool on) {
+    uint64_t p = *(volatile uint64_t *)(uintptr_t)0x7002188a00ull;
+    if (p < 0x7000000000ull || p >= 0x8000000000ull) return;
+    volatile uint32_t *interval = (volatile uint32_t *)(uintptr_t)(p + 0x60);
+    static uint32_t saved;
+    if (on && *interval == 2) saved = 2, *interval = 1;
+    else if (!on && saved && *interval == 1) *interval = saved, saved = 0;
+    static int log = -1;  // LARECOMP_LOG_GAMETIME=1: game time (its dt, [p + 0x18], summed) per second of real time
+    if (log < 0) log = getenv("LARECOMP_LOG_GAMETIME") != NULL;
+    if (log) {
+        static double sum;
+        static uint64_t t0, frames;
+        uint64_t now = plat_now_ns();
+        if (!t0) t0 = now;
+        sum += *(volatile float *)(uintptr_t)(p + 0x18), frames++;
+        if (now - t0 >= 4000000000ull) {
+            LOG("[gametime] %.2f s of game time in %.2f s (%llu frames, interval %u)\n", sum, (now - t0) / 1e9,
+                (unsigned long long)frames, *interval);
+            sum = 0, frames = 0, t0 = now;
+        }
+    }
+}
+
 // ---- version, for the shader caches' tag (runtime/nvn/shader_prep.c)
 const char *larecomp_version(void) { return "mua3-dev"; }
 

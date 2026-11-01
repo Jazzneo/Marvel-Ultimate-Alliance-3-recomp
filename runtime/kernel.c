@@ -650,6 +650,21 @@ static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
 
 static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     uint64_t *x = c->x;
+    {   // (debug) LARECOMP_LOG_SLEEPS=1: sleeps and timed waits of 5 ms or more, once per caller (the frame limiter)
+        static int on = -1;
+        if (on < 0) on = getenv("LARECOMP_LOG_SLEEPS") != NULL;
+        int64_t ns = imm == 0x0B ? (int64_t)x[0] : imm == 0x18 ? (int64_t)x[3] : imm == 0x1C || imm == 0x34 ? (int64_t)x[3] : 0;
+        if (on && ns >= 5000000 && ns < 1000000000) {
+            static uint64_t seen[64];
+            static int n;
+            bool known = false;
+            for (int i = 0; i < n; i++) known |= seen[i] == c->x[30];
+            if (!known && n < 64) {
+                seen[n++] = c->x[30];
+                LOG("[sleep] svc %#x %.2f ms from lr %llx thread %u\n", imm, ns / 1e6, (unsigned long long)c->x[30], t_cur ? t_cur->handle : 0);
+            }
+        }
+    }
     switch (imm) {
     case 0x01: {  // SetHeapSize
         uint64_t size = x[1];
@@ -696,6 +711,10 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x0A: longjmp(t_cur->unwind, 1);  // ExitThread: back to thread_main, which signals the thread object
     case 0x0B: {  // SleepThread (in slices of at most 50 ms: a reboot doesn't wait out a long sleep)
         int64_t ns = (int64_t)x[0];
+        extern bool game_frame_limiter_sleep(uint64_t lr);
+        extern volatile uint64_t g_vsync_period;  // (runtime/hle/vi.c)
+        if (g_vsync_period < 16666667 && game_frame_limiter_sleep(c->x[30]))  // (the game's 30 fps limiter, faster display)
+            ns -= (int64_t)(33333333 - 2 * g_vsync_period);
         if (ns <= 0) { sched_yield(); break; }
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;

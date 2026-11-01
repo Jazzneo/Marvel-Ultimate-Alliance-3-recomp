@@ -835,10 +835,27 @@ NVN(nvnQueueAcquireTexture) {
 static void present_pace(int interval) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_PRESENT_PACE"); on = !e || atoi(e) != 0; }
+    {   // (test) LARECOMP_FPS_AT=<frame>:<hz>: the display's rate from that frame on (runtime/hle/vi.c)
+        static long at = -1, hz;
+        static uint64_t frames;
+        extern void vi_apply_fps(void);  // (the 60 FPS setting: MUA3 never asks for the vsync event, so here)
+        static bool applied;
+        if (!applied) applied = true, vi_apply_fps();
+        extern volatile uint64_t g_vsync_period;
+        extern void game_fps60_frame(bool on);  // (game_hooks.c: the game's frame interval, its time step)
+        game_fps60_frame(g_vsync_period < 16666667);
+        if (at < 0) { const char *e = getenv("LARECOMP_FPS_AT"); at = e ? atol(e) : 0; hz = e && strchr(e, ':') ? atol(strchr(e, ':') + 1) : 0; }
+        extern volatile uint64_t g_vsync_period;
+        if (at && hz >= 30 && hz <= 480 && ++frames == (uint64_t)at) {
+            g_vsync_period = 1000000000ull / (uint64_t)hz;
+            LOG("[nvn] frame %ld: the display at %ld Hz\n", at, hz);
+        }
+    }
     if (!on || interval <= 0) return;
     if (interval > 4) interval = 4;
     static uint64_t next;
-    uint64_t period = 16666667ull * (uint64_t)interval, now = plat_now_ns();
+    extern volatile uint64_t g_vsync_period;  // (runtime/hle/vi.c: the display's vsync)
+    uint64_t period = g_vsync_period * (uint64_t)interval, now = plat_now_ns();
     if (!next || now > next + period) next = now;
     else if (next > now) plat_sleep_until_ns(next);
     next += period;
