@@ -36,14 +36,17 @@ static bool lazy_commit(uint64_t a) {
 
 static bool g_report_crashes;
 
-// (debug) plat_watch_page: CPU writes to a page are logged (the writing module + offset and the call stack, the first
-// 24 writes), each let through by unprotecting the page for one instruction (single step)
+// (debug) plat_watch_page: CPU writes to a page (reads too with `reads`: only those from the game's code) are logged
+// (the module + offset and the call stack, once per caller), each let through by unprotecting the page for one
+// instruction (single step)
 static volatile uint64_t g_watch_page;
 static volatile int g_watch_n;
-void plat_watch_page(uint64_t addr) {
+static DWORD g_watch_prot = PAGE_READONLY;
+void plat_watch_page(uint64_t addr, bool reads) {
     DWORD old;
     g_watch_page = addr & ~0xFFFull;
-    if (!VirtualProtect((void *)(uintptr_t)g_watch_page, 0x1000, PAGE_READONLY, &old)) g_watch_page = 0;
+    g_watch_prot = reads ? PAGE_NOACCESS : PAGE_READONLY;
+    if (!VirtualProtect((void *)(uintptr_t)g_watch_page, 0x1000, g_watch_prot, &old)) g_watch_page = 0;
     fprintf(stderr, "[watch] page %llx %s\n", (unsigned long long)(addr & ~0xFFFull), g_watch_page ? "read-only until written" : "not protected");
 }
 static void watch_where(char *out, size_t n, uint64_t a) {
@@ -59,12 +62,12 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *er = ep->ExceptionRecord;
     if (er->ExceptionCode == EXCEPTION_SINGLE_STEP && g_watch_page) {  // (the watched write is done: protect again)
         DWORD old;
-        VirtualProtect((void *)(uintptr_t)g_watch_page, 0x1000, PAGE_READONLY, &old);
+        VirtualProtect((void *)(uintptr_t)g_watch_page, 0x1000, g_watch_prot, &old);
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
     uint64_t fa = er->ExceptionInformation[1];
-    if (g_watch_page && (fa & ~0xFFFull) == g_watch_page && er->ExceptionInformation[0] == 1) {
+    if (g_watch_page && (fa & ~0xFFFull) == g_watch_page && er->ExceptionInformation[0] <= 1) {
         DWORD old;
         void *bt[24];
         USHORT nb = RtlCaptureStackBackTrace(0, 24, bt, NULL);
@@ -74,11 +77,18 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
         static int nkeys;
         bool seen = false;
         for (int k = 0; k < nkeys; k++) seen |= keys[k] == key;
-        if (!seen && nkeys < 64) {  // (one line per writer: a memcpy faults on every byte)
+        bool game = er->ExceptionInformation[0] == 1;
+        for (USHORT i = 0; i < nb && !game; i++) {
+            char w[300];
+            watch_where(w, sizeof w, (uint64_t)(uintptr_t)bt[i]);
+            game = !strncmp(w, "mua3game.dll", 12);
+        }
+        if (!seen && game && nkeys < 64) {  // (one line per caller: a memcpy faults on every byte)
             keys[nkeys++] = key;
             char w[300];
             watch_where(w, sizeof w, ep->ContextRecord->Rip);
-            fprintf(stderr, "[watch] write to %llx from %s, thread %lu, stack:", (unsigned long long)fa, w, GetCurrentThreadId());
+            fprintf(stderr, "[watch] %s %llx from %s, thread %lu, stack:", er->ExceptionInformation[0] ? "write to" : "read of",
+                    (unsigned long long)fa, w, GetCurrentThreadId());
             for (USHORT i = 0; i < nb; i++) { watch_where(w, sizeof w, (uint64_t)(uintptr_t)bt[i]); fprintf(stderr, " %s", w); }
             fprintf(stderr, "\n");
         }

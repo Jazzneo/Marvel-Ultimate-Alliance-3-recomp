@@ -5756,8 +5756,9 @@ static void draw_indirect(CmdRec *r, bool indexed) {
         if (n % 20000 == 0) LOG("[nvn] indirect: %llu draws, %llu with a count\n", (unsigned long long)n, (unsigned long long)nz);
         if (indexed && !g_ind_probe) {
             g_ind_probe = a;
-            extern void plat_watch_page(uint64_t addr);
-            if (getenv("LARECOMP_WATCH_INDIRECT")) plat_watch_page((uint64_t)(uintptr_t)a);
+            extern void plat_watch_page(uint64_t addr, bool reads);  // (=2: the game's reads too)
+            const char *wi = getenv("LARECOMP_WATCH_INDIRECT");
+            if (wi) plat_watch_page((uint64_t)(uintptr_t)a, atoi(wi) == 2);
         }
     }
     static int cpu = -1;

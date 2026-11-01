@@ -51,7 +51,13 @@ NVN(nvnDeviceInitialize) {
 }
 NVN(nvnDeviceFinalize) { (void)c; }
 NVN(nvnDeviceSetDebugLabel) { (void)c; }
-NVN(nvnDeviceGetInteger) { *(int32_t *)AP(2) = (int32_t)device_integer((uint32_t)A(1)); }
+NVN(nvnDeviceGetInteger) {
+    uint32_t which = (uint32_t)A(1);
+    *(int32_t *)AP(2) = (int32_t)device_integer(which);
+    static uint8_t seen[256];
+    if (getenv("LARECOMP_LOG_DEVICE_INTEGER") && which < 256 && !seen[which]++)
+        LOG("[nvn] GetInteger %u -> %u (lr %llx)\n", which, device_integer(which), (unsigned long long)c->x[30]);
+}
 NVN(nvnDeviceGetCurrentTimestampInNanoseconds) {
     RET(plat_now_ns());
 }
