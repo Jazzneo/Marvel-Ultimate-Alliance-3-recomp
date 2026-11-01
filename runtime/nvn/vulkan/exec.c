@@ -2079,6 +2079,23 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
 }
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
+    if (np->stage_mask & 0x1C) {  // geometry / tessellation stages: not translated, the program draws without them
+        static uint64_t seen[32];
+        static int nseen;
+        uint64_t k = np->stages[2].code_addr ^ np->stages[3].code_addr ^ np->stages[4].code_addr;
+        bool known = false;
+        for (int i = 0; i < nseen; i++) known |= seen[i] == k;
+        if (!known && nseen < 32) {
+            seen[nseen++] = k;
+            LOG("[vk] program with stages %#x (vs %llx fs %llx gs %llx tcs %llx tes %llx): only vs / fs are drawn\n", np->stage_mask,
+                (unsigned long long)np->stages[0].code_addr, (unsigned long long)np->stages[1].code_addr, (unsigned long long)np->stages[2].code_addr,
+                (unsigned long long)np->stages[3].code_addr, (unsigned long long)np->stages[4].code_addr);
+            if (getenv("LARECOMP_DUMP_GS") && np->stages[2].code_addr) {  // (debug) its code, for a look
+                FILE *f = fopen("build/gs_code.bin", "wb");
+                if (f) { fwrite((void *)(uintptr_t)np->stages[2].code_addr, 1, np->stages[2].const_offset + np->stages[2].const_size, f); fclose(f); }
+            }
+        }
+    }
     if (!(np->stage_mask & 1) || !(np->stage_mask & 2)) return NULL;
     uint64_t h = 0xcbf29ce484222325ull;
     for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
@@ -5752,6 +5769,10 @@ static void draw_indirect(CmdRec *r, bool indexed) {
             nlog++;
             LOG("[nvn] indirect %s at %llx (index %llx): %u %u %u %u %u\n", indexed ? "elements" : "arrays",
                 (unsigned long long)(uintptr_t)a, (unsigned long long)(indexed ? r->x[2] : 0), a[0], a[1], a[2], a[3], indexed ? a[4] : 0);
+            if (indexed) {
+                const uint32_t *ix = (const uint32_t *)(uintptr_t)r->x[2];
+                LOG("[nvn]   indices: %u %u %u %u %u %u %u %u\n", ix[0], ix[1], ix[2], ix[3], ix[4], ix[5], ix[6], ix[7]);
+            }
         }
         if (n % 20000 == 0) LOG("[nvn] indirect: %llu draws, %llu with a count\n", (unsigned long long)n, (unsigned long long)nz);
         if (indexed && !g_ind_probe) {
@@ -5805,9 +5826,56 @@ static void draw(CmdRec *r, bool indexed) {
     PROF_ADD(prof_draw);
 }
 static uint64_t prof_tp_;
+// A geometry shader that emits no vertices and stores to memory: MUA3's triangle culling. Its depth-only draws
+// (program 72b4b92f00 / 72b4b94f00) append each visible triangle's three vertex indices (gl_VertexIndex, from the
+// vertex shader's output 0) to storage buffer 1 and add their number to the count at storage buffer 0, which are the
+// index buffer and the arguments of the object's DrawElementsIndirect in the G-buffer pass. Geometry shaders aren't
+// translated, so the draw is replayed as that: every triangle kept (no culling), the count set, nothing rasterized
+// (the shader emits nothing). LARECOMP_GS_CULL_EMU=0: off (the draw is drawn without its geometry shader).
+static bool gs_is_culling(uint64_t code) {  // (stores, atomics, no OUT: by the code, cached per code address)
+    static uint64_t addr[64];
+    static int8_t verdict[64];
+    static int n;
+    for (int i = 0; i < n; i++) if (addr[i] == code) return verdict[i] > 0;
+    const uint64_t *w = (const uint64_t *)(uintptr_t)(code + 0x80);  // (after the NVN header and the program header)
+    bool out = false, store = false;
+    for (int i = 0; i < 4096; i++) {
+        if (i % 4 == 0) continue;
+        uint64_t t = w[i] >> 48;
+        if ((t & 0xfff8) == 0xfbe0 || (t & 0xfef8) == 0xf6e0 || (t & 0xfff8) == 0xebe0) out = true;  // OUT
+        if ((t & 0xfff8) == 0xeed8 || (t & 0xff00) == 0xed00 || (t & 0xfff8) == 0xebf8) store = true;  // STG ATOM RED
+        if ((w[i] & 0xfff0000000000000ull) == 0xe240000000000000ull && ((w[i] >> 20) & 0xffffff) == 0xfffff8) break;  // (end: BRA self)
+    }
+    if (n < 64) addr[n] = code, verdict[n] = store && !out ? 1 : -1, n++;
+    LOG("[vk] geometry shader %llx: %s\n", (unsigned long long)code,
+        store && !out ? "stores and emits nothing (culling): replayed on the CPU" : "not translated (drawn without it)");
+    return store && !out;
+}
+
+static bool gs_cull_replay(CmdRec *r, bool indexed) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_GS_CULL_EMU"); on = !e || atoi(e) != 0; }
+    if (!on || !(st.program->stage_mask & 4) || !gs_is_culling(st.program->stages[2].code_addr)) return false;
+    Range cnt = st.sbuf[2][0], out = st.sbuf[2][1];
+    uint32_t mode = (uint32_t)r->x[0];
+    if (!indexed || mode != 4 || !cnt.addr || cnt.size < 4 || !out.addr) return true;  // (triangles only; nothing else seen)
+    uint32_t n = (uint32_t)r->x[2], itype = (uint32_t)r->x[1];
+    int32_t base = (int32_t)r->x[4];
+    if ((uint64_t)n * 4 > out.size) n = (uint32_t)(out.size / 4) / 3 * 3;
+    uint32_t *o = (uint32_t *)(uintptr_t)out.addr;
+    const void *src = (const void *)(uintptr_t)r->x[3];
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t v = itype == 0 ? ((const uint8_t *)src)[i] : itype == 1 ? ((const uint16_t *)src)[i] : ((const uint32_t *)src)[i];
+        o[i] = v + (uint32_t)base;
+    }
+    *(uint32_t *)(uintptr_t)cnt.addr = n;  // (set, not added: the game resets it on the console somewhere unseen)
+    return true;
+}
+
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
+    if (gs_cull_replay(r, indexed)) return;
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
