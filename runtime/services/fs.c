@@ -525,6 +525,19 @@ static ssize_t romfs_read(uint8_t *dst, uint64_t size, uint64_t off) {
     return (ssize_t)done;
 }
 
+// A romfs file's place in the image, for a reader that goes around the game's file system: the movie player, whose
+// files have no host copy when the game data is read in place from the NSPs. rel: "MOVIE/EV_0101_01.mp4".
+bool romfs_file_find(const char *rel, uint64_t *off, uint64_t *size) {
+    while (*rel == '/') rel++;
+    for (int i = 0; i < rom_nfiles; i++) {
+        const char *p = rom_files[i].path;
+        while (*p == '/') p++;
+        if (!strcasecmp(p, rel)) { *off = rom_files[i].off, *size = rom_files[i].size; return true; }
+    }
+    return false;
+}
+ssize_t romfs_image_read(void *dst, uint64_t n, uint64_t off) { return romfs_read(dst, n, off); }
+
 // Path of the RomFS file containing image offset `off` (NULL if none).
 const char *romfs_file_at(uint64_t off) {
     int lo = 0, hi = rom_nfiles - 1;

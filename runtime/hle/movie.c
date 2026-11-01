@@ -17,6 +17,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "../hle.h"
 #include "../settings.h"
@@ -183,14 +184,46 @@ static void signal_guest_event(Cpu *c, uint64_t event) {
 static void ok(Cpu *c) { c->x[0] = 0; }
 
 // ------------------------------------------------------------------ Extractor
+// a movie read from the romfs image (no host copy: the game data read in place from the NSPs; fs.c)
+bool romfs_file_find(const char *rel, uint64_t *off, uint64_t *size);
+ssize_t romfs_image_read(void *dst, uint64_t n, uint64_t off);
+typedef struct { uint64_t off, size, pos; } RomSrc;
+static int rom_avio_read(void *o, uint8_t *buf, int n) {
+    RomSrc *s = o;
+    if (s->pos >= s->size) return AVERROR_EOF;
+    if ((uint64_t)n > s->size - s->pos) n = (int)(s->size - s->pos);
+    ssize_t r = romfs_image_read(buf, (uint64_t)n, s->off + s->pos);
+    if (r <= 0) return AVERROR_EOF;
+    s->pos += (uint64_t)r;
+    return (int)r;
+}
+static int64_t rom_avio_seek(void *o, int64_t to, int whence) {
+    RomSrc *s = o;
+    if (whence & AVSEEK_SIZE) return (int64_t)s->size;
+    whence &= ~AVSEEK_FORCE;
+    int64_t at = (whence == SEEK_CUR ? (int64_t)s->pos : whence == SEEK_END ? (int64_t)s->size : 0) + to;
+    if (at < 0) return -1;
+    s->pos = (uint64_t)at;
+    return at;
+}
+
 typedef struct {
     AVFormatContext *fmt;
+    AVIOContext *avio;  // (a movie from the romfs image: its reader, on rom)
+    RomSrc *rom;
     int map[16], ntracks;  // exposed track -> stream
     uint64_t selected;  // bitmask of streams
     AVPacket *pkt;
     bool have_pkt, eof;
     bool skippable;  // the launch opening (forced on the first launch, no save yet): A / B / + ends it
 } Extractor;
+
+static void ex_close_input(Extractor *e) {
+    if (e->fmt) avformat_close_input(&e->fmt);
+    if (e->avio) { av_freep(&e->avio->buffer); avio_context_free(&e->avio); }
+    free(e->rom);
+    e->rom = NULL;
+}
 
 static bool g_skip_held;           // ex_fill: A / B held at the last look
 static double g_skip_pressed_at;    // when they were pressed (0 = not yet)
@@ -241,7 +274,7 @@ static void ex_open_path(Cpu *c, const char *path) {
     Extractor *e = self_state(c);
     // Replacing a source also drops its last packet and track selection, including after a failed open.
     if (e->pkt) av_packet_free(&e->pkt);
-    if (e->fmt) avformat_close_input(&e->fmt);
+    ex_close_input(e);
     e->selected = 0;
     e->ntracks = 0;
     e->have_pkt = e->eof = e->skippable = false;
@@ -253,14 +286,27 @@ static void ex_open_path(Cpu *c, const char *path) {
     LOG("[movie] open %s -> %s\n", path ? path : "(null)", host);
     { extern void pace_hitch(const char *why);  // nvn/pace.c
       pace_hitch("a movie"); }
+    struct stat sb;
+    uint64_t roff, rsize;
+    if (stat(host, &sb) && romfs_file_find(rel, &roff, &rsize)) {  // (no host copy: from the romfs image)
+        uint8_t *buf = av_malloc(1 << 16);
+        e->rom = calloc(1, sizeof *e->rom);
+        e->fmt = avformat_alloc_context();
+        if (buf && e->rom && e->fmt) {
+            *e->rom = (RomSrc){roff, rsize, 0};
+            e->avio = avio_alloc_context(buf, 1 << 16, 0, e->rom, rom_avio_read, NULL, rom_avio_seek);
+        }
+        if (e->avio) e->fmt->pb = e->avio;
+        else { av_free(buf); avformat_free_context(e->fmt); e->fmt = NULL; }
+    }
     if (avformat_open_input(&e->fmt, host, NULL, NULL) < 0 || avformat_find_stream_info(e->fmt, NULL) < 0) {
         LOG("[movie] cannot open %s\n", host);
-        if (e->fmt) avformat_close_input(&e->fmt);
+        ex_close_input(e);
         c->x[0] = 1;
         return;
     }
     e->pkt = av_packet_alloc();
-    if (!e->pkt) { avformat_close_input(&e->fmt); c->x[0] = 1; return; }
+    if (!e->pkt) { ex_close_input(e); c->x[0] = 1; return; }
     // the opening at launch can always be skipped, vanilla and randomizer (with no save yet the game forces it)
     e->skippable = rel && strstr(rel, "movie/opening.webm");
     if (e->skippable) g_skip_pressed_at = 0;  // (a press that ended the title's attract replay isn't for this one)
@@ -382,7 +428,7 @@ static void movie_track(int kind, void *p, bool add) {
 static void ex_dtor(Cpu *c) {
     Extractor *e = self_state(c);
     if (e && e->pkt) av_packet_free(&e->pkt);
-    if (e && e->fmt) avformat_close_input(&e->fmt);
+    if (e) ex_close_input(e);
     if (e) movie_track(0, e, false);
     c->x[0] = 0;
 }
