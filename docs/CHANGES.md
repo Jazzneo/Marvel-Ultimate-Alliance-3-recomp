@@ -194,11 +194,16 @@ Inherited from LAS Recomp and used here:
 
 ## Known gaps and next steps
 
-- **Frame rate in menus:** 24–28 fps in some menu screens (~8000 draws per 2 s report); not yet profiled.
-- **Draws skipped:** ~100–120 per 2 s report in menus, with no graphics shader failing to translate: the cause isn't
-  known yet.
-- **Compute shaders:** two use ATOMS (shared-memory atomics, 0xec00: not in the translator yet), one binds image 72
-  as two types.
+- **Gameplay not reached yet:** scripted input gets through title, patch notes (Y closes them), save slot, difficulty
+  and save creation ("Save data has been created. A: START GAME"); what follows hasn't been seen.
+  Route: `300:PLUS, 1300:Y, 1500:PLUS, 1750:A, 2100:UP, 2160:A` (frames shift with load times).
+- **Frame rate:** the title and menus hold 29-30 fps when nothing else uses the GPU. The 3-15 fps stretches seen in
+  testing lined up with other recomps running on the same GPU (~60 ms GPU time slices in `LARECOMP_GPUPROF_SLOW`
+  profiles), so check for them before trusting a measurement.
+- **Compute:** all three title-screen compute shaders now translate (ATOMS, ATOM, imageSize through TXQ; lane id and
+  lane masks were 0). The tiled light culling shader (`cs 72b4b35500`) takes 1.5-10 ms; its light lists are read by
+  the lighting pass from the guest heap in place, which is worth moving to device-local memory. The lane masks
+  assume 32-lane subgroups (NVIDIA); AMD's wave64 would need subgroup size control.
 - **60 fps and above:** the game runs at 30 fps (present interval 2). Finding its frame step and whether its logic
   is tied to the frame rate comes once gameplay runs; any unlock will be a setting that can be turned off.
 - **Build time:** `generated/glslc/glslc_188.c` alone took over 15 minutes at -O1; splitting that chunk would cut the
