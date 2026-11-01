@@ -1071,6 +1071,18 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             if (at == (long)frame) { g_gpuprof_frame = true; break; }
             if (*p == ',') p++; else break;
         }
+        // LARECOMP_GPUPROF_SLOW=<ms>: the frame after one that took longer than that is profiled too (up to 12)
+        static long slow_ms = -1;
+        static uint64_t last_ns;
+        static int slow_n;
+        if (slow_ms < 0) { const char *s = getenv("LARECOMP_GPUPROF_SLOW"); slow_ms = s ? atol(s) : 0; }
+        uint64_t now = SDL_GetTicksNS();
+        if (slow_ms > 0 && last_ns && now - last_ns > (uint64_t)slow_ms * 1000000 && slow_n < 12) {
+            slow_n++;
+            g_gpuprof_frame = true;
+            LOG("[gpuprof] frame %llu took %.0f ms: profiling the next\n", (unsigned long long)frame, (now - last_ns) / 1e6);
+        }
+        last_ns = now;
     }
     if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)frame);
     {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
