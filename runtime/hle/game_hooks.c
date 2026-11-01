@@ -39,7 +39,7 @@ void flags_ext_save_read(const char *path, uint64_t addr, int64_t off, int64_t s
 }
 bool flags_ext_save_written(const char *path, uint64_t addr, int64_t off, int64_t size) {
     (void)path, (void)addr, (void)off, (void)size;
-    return false;
+    return true;  // (false fails the save write)
 }
 void save_editor_frame(uint64_t frame) { (void)frame; }
 

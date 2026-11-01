@@ -5383,6 +5383,7 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
         cp->code = r->vs;  // (prepared: its content hash, for the build logs)
         memcpy(cp->local, r->local, sizeof cp->local);
         if (!translate_compute(cp, vsb->code, vsb->const_offset ? vsb->const_offset : 0x10000, 0, r->stencil)) return false;
+        save_glsl(cp->si->msl, r->vs, "prep_cs");  // (named by its content hash)
         PREP_PUT(prep_cs, ck, cp);
         prep_job(build_compute, cp);
         return true;

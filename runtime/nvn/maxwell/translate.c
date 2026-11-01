@@ -229,6 +229,12 @@ static void set_reg(Ctx *c, int r, const char *expr) {
     sp(&c->body, "    r%d = %s;\n", r, expr);
 }
 
+static void set_dreg(Ctx *c, int r, const char *expr) {
+    if (r == RZ) return;
+    c->reg_used[r] = c->reg_used[r + 1] = 1;
+    sp(&c->body, "    { uvec2 dv_ = unpackDouble2x32(%s); r%d = dv_.x; r%d = dv_.y; }\n", expr, r, r + 1);
+}
+
 static const char *fneg_abs(const char *e, bool neg, bool abs_, char *buf) {
     if (abs_ && neg) sprintf(buf, "(-abs(%s))", e);
     else if (abs_) sprintf(buf, "abs(%s)", e);
@@ -237,6 +243,33 @@ static const char *fneg_abs(const char *e, bool neg, bool abs_, char *buf) {
     return buf;
 }
 #define NA(e, n, a) fneg_abs((e), (n), (a), alloca(600))
+
+// double precision (GLSL): a register pair, low word first
+static const char *dreg(Ctx *c, int r, char *buf) {
+    if (r == RZ) return "0.0lf";
+    c->reg_used[r] = c->reg_used[r + 1] = 1;
+    sprintf(buf, "packDouble2x32(uvec2(r%d, r%d))", r, r + 1);
+    return buf;
+}
+#define DR(r) dreg(c, (r), alloca(64))
+// a double B operand: a register pair, a cbuf pair (bit 20 set: unaligned, the low word is zero) or the top 20 bits
+static const char *double_b(Ctx *c, uint64_t w, char *buf) {
+    char lo[256], hi[256];
+    switch (b_form(w)) {
+    case B_REG: return dreg(c, (int)bits(w, 20, 8), buf);
+    case B_CBUF: {
+        int ix = (int)bits(w, 34, 5);
+        uint32_t off = (uint32_t)bits(w, 20, 14) * 4;
+        if (off & 4) sprintf(buf, "packDouble2x32(uvec2(0u, %s))", cbuf_ref(c, ix, off, NULL, hi));
+        else sprintf(buf, "packDouble2x32(uvec2(%s, %s))", cbuf_ref(c, ix, off, NULL, lo), cbuf_ref(c, ix, off + 4, NULL, hi));
+        return buf;
+    }
+    default:
+        sprintf(buf, "packDouble2x32(uvec2(0u, 0x%08xu))", ((uint32_t)bits(w, 20, 19) | (uint32_t)bits(w, 56, 1) << 19) << 12);
+        return buf;
+    }
+}
+#define DB() double_b(c, w, alloca(600))
 
 static const char *fresult(const char *e, bool sat, char *buf) {
     if (sat) sprintf(buf, "as_type<uint>(saturate(%s))", e);
@@ -1049,6 +1082,24 @@ static void light_tiles_fix(Ctx *c, const uint64_t *code, size_t end, uint32_t p
     sp(&c->body, "    r%d = as_type<uint>(as_type<float>(r%d) * (as_type<float>(%s) * as_type<float>(%s) / as_type<float>(%s)));\n", d, d, a, h, w);  // (GLSL: as_type is rewritten)
 }
 
+// A CAL to a short subroutine without control flow of its own (a texture fetch helper, an empty one) is inlined: its
+// RET would otherwise make the program a pc state machine with a case for every return address, which the driver
+// compiles very slowly (the big effect compute programs: ~3000 calls, minutes per compile). Returns the index of the
+// subroutine's RET, 0 if it isn't one of those.
+static size_t cal_inline_ret(const Ctx *c, uint32_t target) {
+    const uint64_t *code = (const uint64_t *)c->code;
+    if (!code) return 0;
+    for (size_t i = target / 8, n = 0; i < c->ninsts && n < 64; i++) {
+        if (i % 4 == 0) continue;
+        uint64_t w = code[i], top12 = w & 0xfff0000000000000ull;
+        if (top12 == 0xe320000000000000ull) return bits(w, 16, 4) == PT ? i : 0;  // (an unconditional RET)
+        if (((w >> 56) == 0xe2 || (w >> 56) == 0xe3) && top12 != 0xe330000000000000ull) return 0;  // (flow, but KIL)
+        if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull) return 0;                     // (SYNC)
+        n++;
+    }
+    return 0;
+}
+
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     char t[2048], u[2048];
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
@@ -1083,6 +1134,18 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0xe290000000000000ull, 0xfff0000000000020ull)) {  // SSY
         c->uses_branches = true;
         sp(&c->body, "    ssy[ssy_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+    } else if (OPM(0xe260000000000000ull, 0xfff0000000000020ull)) {  // CAL: a subroutine (its RET comes back here)
+        uint32_t target = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
+        size_t ret = cal_inline_ret(c, target);
+        if (ret) {
+            for (size_t i = target / 8; i < ret; i++)
+                if (i % 4) emit_insn(c, ((const uint64_t *)c->code)[i], (uint32_t)(i * 8));
+        } else {
+            c->uses_branches = true;
+            sp(&c->body, "    cst[cst_n++] = %uu; pc = %uu; continue;\n", norm_target((int64_t)pc + 8), target);
+        }
+    } else if (OPM(0xe320000000000000ull, 0xfff0000000000000ull)) {  // RET (from the program itself: EXIT)
+        sp(&c->body, c->branchy ? "    if (cst_n == 0u) { exit_now = true; break; } pc = cst[--cst_n]; continue;\n" : "    break;\n");
     } else if (OPM(0xe2a0000000000000ull, 0xfff0000000000020ull)) {  // PBK
         c->uses_branches = true;
         sp(&c->body, "    pbk[pbk_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
@@ -1392,6 +1455,32 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0x1400000000000000ull, 0xfc00000000000000ull)) {  // ISCADD32I
         sprintf(t, "((%s << %du) + 0x%08xu)", R(a), (int)bits(w, 53, 5), (uint32_t)bits(w, 20, 32));
         set_reg(c, d, t);
+    } else if (OPM(0x5bd0000000000000ull, 0xfff0000000000000ull) || OPM(0x4bd0000000000000ull, 0xfff0000000000000ull) ||
+               OPM(0x36d0000000000000ull, 0xfef8000000000000ull) || OPM(0x1800000000000000ull, 0xfc00000000000000ull)) {
+        // LEA: B + (A << scale); LEA.HI (0x5bd8 reg, 0x18 cbuf): B + ((C:A) >> (32 - scale)), the high word of a
+        // scaled 64-bit index. .X adds the carry in, .CC sets it (64-bit address math); a predicate result isn't modelled.
+        bool hi = OPM(0x5bd8000000000000ull, 0xfff8000000000000ull) || OPM(0x1800000000000000ull, 0xfc00000000000000ull);
+        bool hcb = OPM(0x1800000000000000ull, 0xfc00000000000000ull);
+        int scale = hcb ? (int)bits(w, 51, 5) : hi ? (int)bits(w, 28, 5) : (int)bits(w, 39, 5);
+        bool neg = hcb ? bits(w, 56, 1) : hi ? bits(w, 37, 1) : bits(w, 45, 1);
+        bool x = hcb ? bits(w, 57, 1) : hi ? bits(w, 38, 1) : bits(w, 46, 1), wcc = bits(w, 47, 1);
+        if (bits(w, 48, 3) != PT) { fail(c, "lea predicate result"); return; }
+        char cb[256];
+        const char *bv = hcb ? cbuf_ref(c, (int)bits(w, 34, 5), bits(w, 20, 14) * 4, NULL, cb) : B(false);
+        char off[300];
+        if (hi) snprintf(off, sizeof off, "uint((%s(ulong(%s) << 32 | ulong(%s))) >> %du)", neg ? "-" : "",
+                         R((int)bits(w, 39, 8)), R(a), 32 - scale);
+        else snprintf(off, sizeof off, "((%s%s) << %du)", neg ? "-" : "", R(a), scale);
+        if (x || wcc) {
+            c->uses_cc = true;
+            sp(&c->body, "    { ulong sum = ulong(%s) + ulong(%s)%s;%s\n", off, bv, x ? " + ulong(cc)" : "",
+               wcc ? " cc = uint(sum >> 32) & 1u;" : "");
+            if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = uint(sum);\n", d); }
+            sp(&c->body, "    }\n");
+        } else {
+            sprintf(t, "(%s + %s)", off, bv);
+            set_reg(c, d, t);
+        }
     } else if (OPM(0x5b60000000000000ull, 0xfff0000000000000ull) || OPM(0x4b60000000000000ull, 0xfff0000000000000ull) ||
                OPM(0x3660000000000000ull, 0xfef0000000000000ull)) {  // ISETP
         char cmp[512];
@@ -1801,12 +1890,20 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         icmp_expr(cmp, (int)bits(w, 49, 3), cv, "0u", bits(w, 48, 1));
         sprintf(t, "(%s ? %s : %s)", cmp, R(a), bv);
         set_reg(c, d, t);
-    } else if (OPM(0xed00000000000000ull, 0xff00000000000000ull)) {
+    } else if (OPM(0xed00000000000000ull, 0xff00000000000000ull) || OPM(0xebf8000000000000ull, 0xfff8000000000000ull)) {
         // ATOM: atomic on global memory at Ra (+ Ra+1 << 32 with .E, bit 48) + imm20 (bits 28-47, signed); size at 49
         // (U32 only here), op at 52 (ADD MIN MAX INC DEC AND OR XOR EXCH); d = the old value. Compute (GLSL) only: the
         // dispatch's storage buffers are in gfast_ (exec.c gfast_prepare), where it is a real atomic; outside them the
         // heap word is read, changed and written back (not atomic)
-        int size = (int)bits(w, 49, 3), op = (int)bits(w, 52, 4), b = (int)bits(w, 20, 8);
+        // RED: the same without a result: the value is Rd's field (bits 0-7), size at 20 (U32, S32: the same for ADD and
+        // the bit ops), op at 23
+        bool red = OPM(0xebf8000000000000ull, 0xfff8000000000000ull);
+        int size = red ? (int)bits(w, 20, 3) : (int)bits(w, 49, 3), op = red ? (int)bits(w, 23, 3) : (int)bits(w, 52, 4);
+        int b = red ? d : (int)bits(w, 20, 8);
+        if (red) {
+            if (size == 1 && (op == 0 || op >= 5)) size = 0;
+            d = RZ;
+        }
         int64_t off = sbits(w, 28, 20);
         static const char *const fn[] = {"atomicAdd", "atomicMin", "atomicMax", NULL, NULL, "atomicAnd", "atomicOr",
                                          "atomicXor", "atomicExchange"};
@@ -1995,6 +2092,52 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (p != PT) { c->pred_used[p] = 1; sp(&c->body, "      p%d = cmp %s pp;\n", p, bool_op(bo)); }
         if (q != PT) { c->pred_used[q] = 1; sp(&c->body, "      p%d = !cmp %s pp;\n", q, bool_op(bo)); }
         sp(&c->body, "    }\n");
+    } else if (OPM(0x5c80000000000000ull, 0xfff8000000000000ull) || OPM(0x4c80000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0x3880000000000000ull, 0xfef8000000000000ull) || OPM(0x5c70000000000000ull, 0xfff8000000000000ull) ||
+               OPM(0x4c70000000000000ull, 0xfff8000000000000ull) || OPM(0x3870000000000000ull, 0xfef8000000000000ull) ||
+               OPM(0x5b70000000000000ull, 0xfff0000000000000ull) || OPM(0x4b70000000000000ull, 0xfff0000000000000ull) ||
+               OPM(0x3670000000000000ull, 0xfef0000000000000ull) || OPM(0x5370000000000000ull, 0xfff0000000000000ull) ||
+               OPM(0x5b80000000000000ull, 0xfff0000000000000ull) || OPM(0x4b80000000000000ull, 0xfff0000000000000ull) ||
+               OPM(0x3680000000000000ull, 0xfef0000000000000ull)) {
+        // DMUL (-A at 48), DADD (|A| 46, -A 48, |B| 49, -B 45), DFMA (A * -B (48) + -C (49), C = R39; 0x53: B = R39,
+        // C = cbuf), DSETP (as FSETP): doubles in register pairs. The rounding modes and .CC aren't modelled.
+        if (!c->glsl) { fail(c, "double precision (MSL)"); return; }
+        if (OPM(0x5c80000000000000ull, 0xfff8000000000000ull) || OPM(0x4c80000000000000ull, 0xfff8000000000000ull) ||
+            OPM(0x3880000000000000ull, 0xfef8000000000000ull)) {
+            sprintf(t, "(%s * %s)", NA(DR(a), bits(w, 48, 1), false), DB());
+            set_dreg(c, d, t);
+        } else if (OPM(0x5c70000000000000ull, 0xfff8000000000000ull) || OPM(0x4c70000000000000ull, 0xfff8000000000000ull) ||
+                   OPM(0x3870000000000000ull, 0xfef8000000000000ull)) {
+            sprintf(t, "(%s + %s)", NA(DR(a), bits(w, 48, 1), bits(w, 46, 1)), NA(DB(), bits(w, 45, 1), bits(w, 49, 1)));
+            set_dreg(c, d, t);
+        } else if (OPM(0x5b80000000000000ull, 0xfff0000000000000ull) || OPM(0x4b80000000000000ull, 0xfff0000000000000ull) ||
+                   OPM(0x3680000000000000ull, 0xfef0000000000000ull)) {
+            const char *x = NA(DR(a), bits(w, 43, 1), bits(w, 7, 1)), *y = NA(DB(), bits(w, 6, 1), bits(w, 44, 1));
+            char cmp[1400];
+            fcmp_expr(cmp, (int)bits(w, 48, 4), x, y);
+            int p = (int)bits(w, 3, 3), q = (int)bits(w, 0, 3), bo = (int)bits(w, 45, 2);
+            const char *pc_ = P((int)bits(w, 39, 3), bits(w, 42, 1));
+            sp(&c->body, "    { bool cmp = %s; bool pp = %s;\n", cmp, pc_);
+            if (p != PT) { c->pred_used[p] = 1; sp(&c->body, "      p%d = cmp %s pp;\n", p, bool_op(bo)); }
+            if (q != PT) { c->pred_used[q] = 1; sp(&c->body, "      p%d = !cmp %s pp;\n", q, bool_op(bo)); }
+            sp(&c->body, "    }\n");
+        } else {  // DFMA
+            const char *bv, *cv;
+            char cb[600];
+            if (OPM(0x5370000000000000ull, 0xfff0000000000000ull)) {
+                bv = DR((int)bits(w, 39, 8));
+                int ix = (int)bits(w, 34, 5);
+                uint32_t off = (uint32_t)bits(w, 20, 14) * 4;
+                char lo[256], hi[256];
+                sprintf(cb, "packDouble2x32(uvec2(%s, %s))", cbuf_ref(c, ix, off & ~7u, NULL, lo), cbuf_ref(c, ix, (off & ~7u) + 4, NULL, hi));
+                cv = cb;
+            } else {
+                bv = DB();
+                cv = DR((int)bits(w, 39, 8));
+            }
+            sprintf(t, "fma(%s, %s, %s)", DR(a), NA(bv, bits(w, 48, 1), false), NA(cv, bits(w, 49, 1), false));
+            set_dreg(c, d, t);
+        }
     } else if (OPM(0x5098000000000000ull, 0xfff8000000000000ull)) {  // CSET
         fail(c, "cset");
     } else if (OPM(0xf0a8000000000000ull, 0xfff8000000000000ull)) {  // BAR
@@ -2444,6 +2587,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0u; uint pbk[16]; uint pbk_n = 0u; uint pcnt[16]; uint pcnt_n = 0u;\n");
+        sp(&s, "  uint cst[16]; uint cst_n = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
         sp(&s, "  for (uint guard = 0u; guard < 100000u; guard++) {\n  switch (pc) {\n");
         sp(&s, "%s", body.buf ? body.buf : "");
@@ -2507,7 +2651,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
 static bool brx_table_labels(const uint8_t *code, size_t i, size_t end, const uint8_t *blob, size_t const_offset, uint8_t *label) {
     static int all = -1;
     if (all < 0) { const char *e = getenv("LARECOMP_BRX_ALL_LABELS"); all = e && atoi(e) != 0; }
-    if (all || const_offset >= 0x10000 || const_offset < 0x80) return false;  // (0x10000: no constants known)
+    if (all || const_offset == 0x10000 || const_offset < 0x80) return false;  // (0x10000: no constants known; a program
+                                                                              //  can be bigger, the effect compute ones are)
     uint64_t brx = ((const uint64_t *)code)[i];
     int ra = (int)bits(brx, 8, 8);
     int64_t imm = sbits(brx, 20, 24);
@@ -2574,6 +2719,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (w == 0 && i > 4) break;
         end = i + 1;
     }
+    c->code = code;
+    c->ninsts = end;
     // collect branch targets (labels)
     uint8_t *label = calloc(end + 4, 1);
     label[1] = 1;
@@ -2589,6 +2736,13 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         if (is_flow) {
             int64_t t = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
             if (t >= 0 && (size_t)(t / 8) < end) label[t / 8] = 1;
+            any_branch = true;
+        }
+        if ((w & 0xfff0000000000020ull) == 0xe260000000000000ull &&  // CAL: the subroutine and the return address
+            !cal_inline_ret(c, norm_target((int64_t)pc + 8 + sbits(w, 20, 24)))) {
+            int64_t t = norm_target((int64_t)pc + 8 + sbits(w, 20, 24)), r = norm_target((int64_t)pc + 8);
+            if (t >= 0 && (size_t)(t / 8) < end) label[t / 8] = 1;
+            if ((size_t)(r / 8) < end) label[r / 8] = 1;
             any_branch = true;
         }
         if ((w & 0xfff0000000000000ull) == 0xe250000000000000ull) {  // BRX: its jump table's targets, else any instruction
@@ -2739,6 +2893,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     if (dbg) sp(&s, maxwell_dbg_pc == 0xffffffffu ? "  float dbgv = 1.0f;\n" : "  float dbgv = -1.0f;\n");
     if (any_branch) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0; uint pbk[16]; uint pbk_n = 0; uint pcnt[16]; uint pcnt_n = 0;\n");
+        sp(&s, "  uint cst[16]; uint cst_n = 0;\n");
         sp(&s, "  bool exit_now = false;\n");
         sp(&s, "  for (uint guard = 0; guard < 100000u; guard++) {\n  switch (pc) {\n");
         sp(&s, "%s", c->body.buf ? c->body.buf : "");

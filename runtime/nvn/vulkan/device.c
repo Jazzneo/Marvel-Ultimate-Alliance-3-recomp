@@ -499,6 +499,7 @@ static void create_device(void) {
     b->samplerAnisotropy = h->samplerAnisotropy;
     b->textureCompressionBC = h->textureCompressionBC;
     b->shaderInt64 = h->shaderInt64;
+    b->shaderFloat64 = h->shaderFloat64;  // (DMUL / DADD / DFMA / DSETP)
     b->depthBiasClamp = h->depthBiasClamp;
     b->depthClamp = h->depthClamp;
     b->largePoints = h->largePoints;
