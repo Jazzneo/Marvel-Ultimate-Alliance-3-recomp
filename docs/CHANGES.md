@@ -285,6 +285,81 @@ emissive screens). The cause:
   `build/icon.ico` (in both executables, `windres`) from `extracted/control/icon_*.dat`: the game's own home-menu icon
   from your dump, never committed. The window's title is "Marvel Ultimate Alliance 3 Recomp".
 
+## Releases, RecompLauncher, the launcher's setup and controls (2026-11-13)
+
+Ported from ARMS Rearmed's release work (the same LAS Recomp base), with MUA3's third module (`glslc`) and its
+Expansion Pass.
+
+### The release (`make dist`)
+
+- `build/dist/MUA3-Recomp-v<VERSION>-Windows-x64.zip` (85 MB, top folder `MUA3 Recomp/`): the runtime and the launcher
+  built with `RELEASE=1` (no console: the log is `mua3recomp.log` next to the exe; no debug info; the original icon),
+  an LGPL-only FFmpeg (`tools/build_deps_windows.sh`: H.264 + AAC in MP4 is what the game's 127 movies use, checked
+  with ffprobe), `mua3gen` (`tools/nsp_extract.py` + `tools/gen.py` frozen by PyInstaller, `tools/mua3gen.spec`; Control
+  Flow Guard cleared, `tools/pe_no_cfg.py`), zig 0.17.0 slimmed with its runtime built ahead of time
+  (`tools/fetch_zig.sh`, `tools/zig_slim.sh`) and `gamelib-src/` (the headers and the `GAMELIB_ID` the game code is
+  compiled against). It holds no game code and no game files: the build fails if game code, game files, keys, GPL
+  codec libraries or paths of the build machine end up in it.
+- `make dlls`: the MSYS2 runtime DLLs next to a source build's programs, so they start from Explorer and the launcher.
+- Build notes: MSYS2's make drops `USERPROFILE` from its recipes (PyInstaller then can't find a home folder), so
+  `make gen-helper USERPROFILE="$USERPROFILE"`; FFmpeg's configure needs a POSIX `TMPDIR` when `TEMP` is a Windows path.
+- Player-facing names: "MUA3 Recomp" instead of "LAS Recomp" in message boxes, crash explanations (their advice is
+  MUA3's: version 4.0.1, GAME FILES / RecompLauncher's Set up instead of LAS Recomp's start screen) and the log's
+  `[info]` line; the Windows logs are `mua3recomp*.log`. The version is the Makefile's `VERSION` (`-dev` in a source
+  build).
+- The release's icon is original (`tools/make_original_icon.py` -> `docs/icon/`): a source build still uses the game's
+  own from your dump.
+
+### The launcher (`launcher/launcher.cpp`)
+
+- Pages: PLAY (status: files set up, the NSPs still where `romfs.src` says, the PC version built), GAME FILES (base game
+  NSP or XCI, the 4.0.1 update, the optional Expansion Pass, prod.keys; INSTALL / REBUILD / CANCEL with a live log;
+  in a source checkout: venv, `nsp_extract.py`, `make gen`, `make`; in the release: `mua3gen`, then the game code
+  compiled by zig in parallel and linked against `mua3recomp.dll.a`), DISPLAY (as before, plus volume and movie sound),
+  CONTROLS, ABOUT.
+- CONTROLS: every Switch input on the keyboard (24: buttons and both sticks' directions) and on a controller (16
+  buttons), click then press; a binding already in use swaps, Esc or a click cancels, 5 s timeout. The same tables,
+  defaults and `bind_key_*` / `bind_pad_*` lines as the game's own menu (`runtime/hle/bindings.c`): only bindings that
+  differ from the defaults are written. Controller names follow the connected pad (Xbox / PlayStation / Nintendo);
+  controller navigation is held off while a rebind waits and until its button is let go. Rumble, its strength and
+  background input are there too.
+- Command lines (RecompLauncher): `--prepare --game=<nsp|xci> --update=<nsp> [--dlc=<nsp>] --keys=<prod.keys>` (no
+  window, `progress <0..1> <text>` lines, `prepare.log`; each option also as two arguments; `--base=` = `--game=`) and
+  `--play` (the game, waited for; its exit code is the launcher's; the window opens only when a release update needs
+  the game code rebuilt). Without them the launcher opens as before.
+- Test switch: `MUA3_LAUNCHER_REBIND=k<slot>:<key name>|p<slot>:<button>,...` (rebinds through the capture path, then
+  saves and quits), next to `MUA3_LAUNCHER_SHOT`, `MUA3_LAUNCHER_TAB` and `MUA3_LAUNCHER_PLAY`.
+
+### `tools/nsp_extract.py`
+
+- XCI as well as NSP (the root HFS0's secure partition), ARMS Rearmed's version; the ARMS-only shader unpacking is left
+  out. `--title` / `--build` / `--want` refuse another game, another version (no update, or another one) and an add-on
+  of another game in one line; a prod.keys without the keys needed, or with a damaged key, is said in one line too.
+  Without these options nothing changed.
+
+### RecompLauncher (`recomplauncher.json`, in every release zip)
+
+- Easy Setup inputs: the game (NSP / XCI, with the shared `switch.prod-keys`), the 4.0.1 update, the optional Expansion
+  Pass; `prepare` runs `mua3launcher --prepare`, `start` runs `mua3launcher --play`. Settings on the game's page
+  (window, size, screen shape, render resolution, upscaling, anti-aliasing, frame rate, FPS counter, volume, movie
+  sound, face buttons by position or by label, rumble and its strength, background input) and the keyboard as
+  bindings; saves, logs, the shader cache. New installs start with background input off (the launcher's overlay
+  uses the controller). Checked against the schema in RecompLauncher's agent guide: 0 errors.
+
+### Checked
+
+- A fresh checkout builds (`make gen` 75 s, `make -j16` 26 min 47 s on an i7-11700F, no errors) and
+  `tools/route.sh kree` plays into the first level at 29 fps.
+- The release, unzipped to a new folder and run with Windows' own PATH only (no MSYS2, Python or clang):
+  `mua3launcher --prepare` as RecompLauncher runs it (paths with spaces and brackets, the Expansion Pass included)
+  finished in 2399 s (extract 0 s, the three modules' C in 57 s, zig: 1023 files 13 at a time, then the link) with the
+  same game code library id as the source build; `mua3launcher --play` with the kree route: the opening movie on the
+  LGPL FFmpeg, then the first level at 29 fps (51.7k draws a frame, as the source build), saves in `save/`, the log in
+  `mua3recomp.log`. The slowest single file, `glslc_188.c`, sets the setup's floor.
+- The launcher's rebinding through `MUA3_LAUNCHER_REBIND` (a swap on the keyboard, a free button on the controller,
+  a key taken from another input): the bindings written as the game writes them, every other line of larecomp.ini
+  (comments, unknown keys) kept.
+
 ## Status (MUA3, 2026-11-01)
 
 - **Runs at 29-30 fps at 1920x1080** (i9-10900, RTX 3080 Ti) from the title through save creation, the opening movie

@@ -1,0 +1,373 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "MUA3 Recomp",
+  "repo": "VirtuaQuest/Marvel-Ultimate-Alliance-3-recomp",
+  "min": "0.90.0-beta.36",
+  "requires": [
+    "start",
+    "setup",
+    "exit_codes",
+    "settings.ini",
+    "settings.choices",
+    "settings.slider",
+    "settings.groups",
+    "settings.bindings"
+  ],
+  "inputs": [
+    {
+      "id": "base",
+      "label": "Your MARVEL ULTIMATE ALLIANCE 3: The Black Order game: an NSP or XCI dumped from your own Switch. Keep it where it is: the game reads its data from it.",
+      "role": "game",
+      "formats": [
+        {
+          "type": "file",
+          "extensions": ["nsp", "xci"],
+          "requires": ["keys"]
+        }
+      ]
+    },
+    {
+      "id": "update",
+      "label": "The game's 4.0.1 update (NSP, version 524288) from your own Switch. Keep it where it is too.",
+      "role": "update",
+      "formats": [
+        {
+          "type": "file",
+          "extensions": ["nsp"]
+        }
+      ]
+    },
+    {
+      "id": "dlc",
+      "label": "The Expansion Pass (NSP), if you have it.",
+      "role": "dlc",
+      "optional": true,
+      "formats": [
+        {
+          "type": "file",
+          "extensions": ["nsp"]
+        }
+      ]
+    },
+    {
+      "id": "keys",
+      "label": "Your Switch's prod.keys",
+      "role": "key",
+      "shared": "switch.prod-keys"
+    }
+  ],
+  "prepare": {
+    "program": ["mua3launcher.exe"],
+    "args": [
+      "--prepare",
+      "--game={input:base}",
+      "--update={input:update}",
+      "--dlc={input:dlc}",
+      "--keys={input:keys}"
+    ],
+    "label": "Recompiling MUA3 from your copy for your PC (30 to 60 minutes)",
+    "timeout": 7200
+  },
+  "start": {
+    "program": ["mua3launcher.exe"],
+    "args": ["--play"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [{ "path": "{install}/larecomp.ini" }],
+      "new": {
+        "fullscreen": "0",
+        "exclusive_fullscreen": "0",
+        "window_width": "0",
+        "window_height": "0",
+        "resolution": "auto",
+        "upscaler": "auto",
+        "antialias": "off",
+        "aspect": "unlocked",
+        "frame_rate": "30",
+        "show_fps": "0",
+        "volume": "1.00",
+        "movie_audio": "1",
+        "rumble": "1",
+        "rumble_strength": "100",
+        "background_input": "0"
+      }
+    }
+  ],
+  "groups": [
+    { "id": "Display" },
+    { "id": "Quality" },
+    { "id": "Sound" },
+    { "id": "Controls" },
+    { "id": "Keyboard" }
+  ],
+  "settings": [
+    {
+      "id": "window",
+      "label": "Window mode",
+      "group": "Display",
+      "help": "F11 or Alt+Enter also switches in game.",
+      "choices": [
+        { "label": "Windowed", "set": { "fullscreen": "0", "exclusive_fullscreen": "0" } },
+        { "label": "Borderless full screen", "set": { "fullscreen": "1", "exclusive_fullscreen": "0" } },
+        { "label": "Exclusive full screen", "set": { "fullscreen": "1", "exclusive_fullscreen": "1" } }
+      ],
+      "defaults": { "fullscreen": "0", "exclusive_fullscreen": "0" }
+    },
+    {
+      "id": "window_size",
+      "label": "Window size",
+      "group": "Display",
+      "help": "The window's size in Windowed mode. It can be resized while playing.",
+      "choices": [
+        { "label": "Default (1280 x 720)", "set": { "window_width": "0", "window_height": "0" } },
+        { "label": "1600 x 900", "set": { "window_width": "1600", "window_height": "900" } },
+        { "label": "1920 x 1080", "set": { "window_width": "1920", "window_height": "1080" } },
+        { "label": "2560 x 1440", "set": { "window_width": "2560", "window_height": "1440" } },
+        { "label": "3840 x 2160", "set": { "window_width": "3840", "window_height": "2160" } }
+      ],
+      "defaults": { "window_width": "0", "window_height": "0", "fullscreen": "0" },
+      "when": { "fullscreen": "0" }
+    },
+    {
+      "id": "aspect",
+      "label": "Screen shape",
+      "group": "Display",
+      "help": "Fill the window, or keep the game's 16:9 picture with bars on wider screens.",
+      "choices": [
+        { "label": "Fill the window", "set": { "aspect": "unlocked" } },
+        { "label": "Original 16:9", "set": { "aspect": "original" } }
+      ],
+      "defaults": { "aspect": "unlocked" }
+    },
+    {
+      "id": "resolution",
+      "label": "Render resolution",
+      "group": "Quality",
+      "help": "How sharp the game is drawn. 1x is the Switch's own 1080p; Auto picks what suits your graphics card.",
+      "choices": [
+        { "label": "Auto", "set": { "resolution": "auto" } },
+        { "label": "Match the display", "set": { "resolution": "match" } },
+        { "label": "1x (1080p)", "set": { "resolution": "1x" } },
+        { "label": "2x (4K)", "set": { "resolution": "2x" } },
+        { "label": "3x", "set": { "resolution": "3x" } },
+        { "label": "4x", "set": { "resolution": "4x" } },
+        { "label": "Dynamic", "set": { "resolution": "dynamic" } },
+        { "label": "75% of the display", "set": { "resolution": "75%" } },
+        { "label": "50% of the display", "set": { "resolution": "50%" } }
+      ],
+      "defaults": { "resolution": "auto" }
+    },
+    {
+      "id": "upscaler",
+      "label": "Upscaling",
+      "group": "Quality",
+      "help": "How the picture is fitted to your screen. FSR 1 is sharper and works on any graphics card.",
+      "choices": [
+        { "label": "Auto", "set": { "upscaler": "auto" } },
+        { "label": "AMD FSR 1 (sharp)", "set": { "upscaler": "fsr1" } },
+        { "label": "Bilinear (soft)", "set": { "upscaler": "bilinear" } }
+      ],
+      "defaults": { "upscaler": "auto" }
+    },
+    {
+      "id": "antialias",
+      "label": "Anti-aliasing",
+      "group": "Quality",
+      "help": "SMAA smooths jagged edges.",
+      "choices": [
+        { "label": "Off", "set": { "antialias": "off" } },
+        { "label": "SMAA", "set": { "antialias": "smaa" } }
+      ],
+      "defaults": { "antialias": "off" }
+    },
+    {
+      "id": "frame_rate",
+      "label": "Frame rate",
+      "group": "Quality",
+      "help": "30 is the console's own. The game keeps time by the clock, so it plays at its normal speed at 60 and 120 too; 120 needs a fast PC and a 120 Hz screen.",
+      "choices": [
+        { "label": "30 fps (original)", "set": { "frame_rate": "30" } },
+        { "label": "60 fps", "set": { "frame_rate": "60" } },
+        { "label": "120 fps", "set": { "frame_rate": "120" } }
+      ],
+      "defaults": { "frame_rate": "30" }
+    },
+    {
+      "id": "show_fps",
+      "label": "Frame rate counter",
+      "group": "Quality",
+      "help": "The frame rate in the corner of the game.",
+      "choices": [
+        { "label": "Off", "set": { "show_fps": "0" } },
+        { "label": "On", "set": { "show_fps": "1" } }
+      ],
+      "defaults": { "show_fps": "0" }
+    },
+    {
+      "id": "volume",
+      "label": "Volume",
+      "group": "Sound",
+      "help": "1 is the game's own loudness; up to 2 makes it louder.",
+      "slider": { "key": "volume", "min": 0, "max": 2, "step": 0.05, "format": "%.2f" },
+      "defaults": { "volume": "1.00" }
+    },
+    {
+      "id": "movie_audio",
+      "label": "Sound in the movies",
+      "group": "Sound",
+      "help": "The story movies' voices and music.",
+      "choices": [
+        { "label": "On", "set": { "movie_audio": "1" } },
+        { "label": "Off", "set": { "movie_audio": "0" } }
+      ],
+      "defaults": { "movie_audio": "1" }
+    },
+    {
+      "id": "face_buttons",
+      "label": "Face buttons",
+      "group": "Controls",
+      "help": "By position: the right face button is the Switch's A, as on the console. By label: an Xbox controller's A is the Switch's A. The launcher in the game's folder (mua3launcher.exe) and the in-game menu (F1) remap every button.",
+      "choices": [
+        { "label": "By position (as on the Switch)", "set": { "bind_pad_a": "east", "bind_pad_b": "south", "bind_pad_x": "north", "bind_pad_y": "west" } },
+        { "label": "By label (Xbox style)", "set": { "bind_pad_a": "south", "bind_pad_b": "east", "bind_pad_x": "west", "bind_pad_y": "north" } }
+      ],
+      "defaults": { "bind_pad_a": "east", "bind_pad_b": "south", "bind_pad_x": "north", "bind_pad_y": "west" }
+    },
+    {
+      "id": "rumble",
+      "label": "Rumble",
+      "group": "Controls",
+      "help": "Controller vibration, where the game uses it on the Switch.",
+      "choices": [
+        { "label": "On", "set": { "rumble": "1" } },
+        { "label": "Off", "set": { "rumble": "0" } }
+      ],
+      "defaults": { "rumble": "1" }
+    },
+    {
+      "id": "rumble_strength",
+      "label": "Rumble strength",
+      "group": "Controls",
+      "help": "How strong the vibration is.",
+      "choices": [
+        { "label": "100%", "set": { "rumble_strength": "100" } },
+        { "label": "75%", "set": { "rumble_strength": "75" } },
+        { "label": "50%", "set": { "rumble_strength": "50" } },
+        { "label": "25%", "set": { "rumble_strength": "25" } }
+      ],
+      "defaults": { "rumble_strength": "100", "rumble": "1" },
+      "when": { "rumble": "1" }
+    },
+    {
+      "id": "background_input",
+      "label": "Controllers in the background",
+      "group": "Controls",
+      "help": "Let controllers work while the game isn't the window in front.",
+      "advanced": true,
+      "choices": [
+        { "label": "Off", "set": { "background_input": "0" } },
+        { "label": "On", "set": { "background_input": "1" } }
+      ],
+      "defaults": { "background_input": "0" }
+    },
+    {
+      "id": "keys",
+      "label": "Keyboard",
+      "group": "Keyboard",
+      "help": "The keys for the Switch's buttons and sticks (keyboard keys, one each). The in-game menu (F1) changes them too.",
+      "bindings": {
+        "max": 1,
+        "actions": [
+          { "label": "A", "key": "bind_key_a" },
+          { "label": "B", "key": "bind_key_b" },
+          { "label": "X", "key": "bind_key_x" },
+          { "label": "Y", "key": "bind_key_y" },
+          { "label": "L", "key": "bind_key_l" },
+          { "label": "R", "key": "bind_key_r" },
+          { "label": "ZL", "key": "bind_key_zl" },
+          { "label": "ZR", "key": "bind_key_zr" },
+          { "label": "Plus (+)", "key": "bind_key_plus" },
+          { "label": "Minus (-)", "key": "bind_key_minus" },
+          { "label": "Left stick Up", "key": "bind_key_ls_up" },
+          { "label": "Left stick Down", "key": "bind_key_ls_down" },
+          { "label": "Left stick Left", "key": "bind_key_ls_left" },
+          { "label": "Left stick Right", "key": "bind_key_ls_right" },
+          { "label": "Left stick press", "key": "bind_key_lstick" },
+          { "label": "Right stick Up", "key": "bind_key_rs_up" },
+          { "label": "Right stick Down", "key": "bind_key_rs_down" },
+          { "label": "Right stick Left", "key": "bind_key_rs_left" },
+          { "label": "Right stick Right", "key": "bind_key_rs_right" },
+          { "label": "Right stick press", "key": "bind_key_rstick" },
+          { "label": "D-pad Up", "key": "bind_key_up" },
+          { "label": "D-pad Down", "key": "bind_key_down" },
+          { "label": "D-pad Left", "key": "bind_key_left" },
+          { "label": "D-pad Right", "key": "bind_key_right" }
+        ],
+        "names": {
+          "Enter": "Return",
+          "Ctrl": "Left Ctrl",
+          "Control": "Left Ctrl",
+          "Shift": "Left Shift",
+          "Alt": "Left Alt",
+          "Esc": "Escape",
+          "ArrowUp": "Up",
+          "ArrowDown": "Down",
+          "ArrowLeft": "Left",
+          "ArrowRight": "Right",
+          "Numpad 0": "Keypad 0",
+          "Numpad 1": "Keypad 1",
+          "Numpad 2": "Keypad 2",
+          "Numpad 3": "Keypad 3",
+          "Numpad 4": "Keypad 4",
+          "Numpad 5": "Keypad 5",
+          "Numpad 6": "Keypad 6",
+          "Numpad 7": "Keypad 7",
+          "Numpad 8": "Keypad 8",
+          "Numpad 9": "Keypad 9"
+        }
+      },
+      "defaults": {
+        "bind_key_a": "K",
+        "bind_key_b": "J",
+        "bind_key_x": "L",
+        "bind_key_y": "I",
+        "bind_key_lstick": "F",
+        "bind_key_rstick": "Keypad 0",
+        "bind_key_l": "Q",
+        "bind_key_r": "E",
+        "bind_key_zl": "1",
+        "bind_key_zr": "3",
+        "bind_key_plus": "Return",
+        "bind_key_minus": "Backspace",
+        "bind_key_left": "Left",
+        "bind_key_up": "Up",
+        "bind_key_right": "Right",
+        "bind_key_down": "Down",
+        "bind_key_ls_up": "W",
+        "bind_key_ls_down": "S",
+        "bind_key_ls_left": "A",
+        "bind_key_ls_right": "D",
+        "bind_key_rs_up": "Keypad 8",
+        "bind_key_rs_down": "Keypad 5",
+        "bind_key_rs_left": "Keypad 4",
+        "bind_key_rs_right": "Keypad 6"
+      }
+    }
+  ],
+  "saves": ["{install}/save", "{install}/larecomp.ini"],
+  "folders": {
+    "saves": [{ "path": "{install}/save" }],
+    "logs": [{ "path": "{install}" }],
+    "data": [{ "path": "{install}" }]
+  },
+  "actions": [
+    { "id": "saves", "label": "Saves", "help": "Your save slots.", "open": "saves" },
+    { "id": "cache", "label": "Shader cache", "help": "Shaders the game has built, so later levels don't stutter. Clearing only helps if graphics look wrong after an update.", "clear": "data/cache" }
+  ],
+  "exit_codes": { "0": "ok" },
+  "looks": { "graphics": "vulkan" }
+}
