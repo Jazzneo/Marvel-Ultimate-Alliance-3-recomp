@@ -66,53 +66,54 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
     char head[160], what[400];
     if (rt_romfs_files >= 0 && rt_romfs_files < ROMFS_FILES) {
         snprintf(head, sizeof head, "Your game files are incomplete");
-        snprintf(what, sizeof what, "LAS Recomp found %d of the game's %d files, and the game stopped when it needed "
-                 "one that's missing. Copy your game files again so none are missing, then set them up again on the "
-                 "start screen (Game Files).", rt_romfs_files, (int)ROMFS_FILES);
+        snprintf(what, sizeof what, "MUA3 Recomp found %d of the game's %d files, and the game stopped when it needed "
+                 "one that's missing. Check your NSPs are complete, then set them up again (GAME FILES in the "
+                 "launcher, or Set up in RecompLauncher).", rt_romfs_files, (int)ROMFS_FILES);
     } else if (has("doesn't fit its language")) {
         snprintf(head, sizeof head, "Your game files' text has been changed");
         snprintf(what, sizeof what, "The game's text for this language comes from another language (a translation "
-                 "patch), and the game stopped at a question it can't show that way. Set up unmodified game files on "
-                 "the start screen (Game Files). To play in another language, pick it in Settings (Language).");
+                 "patch), and the game stopped at a question it can't show that way. Set up unmodified game files (GAME "
+                 "FILES in the launcher, or Set up in RecompLauncher). To play in another language, pick it in "
+                 "Settings (Language).");
     } else if (has("built for another version")) {
-        snprintf(head, sizeof head, "The game code was built for other game files or another version of LAS Recomp");
-        snprintf(what, sizeof what, "Start LAS Recomp again: the start screen rebuilds the game code for these game "
-                 "files by itself.");
+        snprintf(head, sizeof head, "The game code was built for other game files or another version of MUA3 Recomp");
+        snprintf(what, sizeof what, "Start MUA3 Recomp again from its launcher (or RecompLauncher): it rebuilds the "
+                 "game code for these game files by itself.");
     } else if (has("unsupported version of the game")) {
         snprintf(head, sizeof head, "Wrong version of the game");
-        snprintf(what, sizeof what, "LAS Recomp needs version 1.0.0, 1.0.1 or 1.1.0 of the game. Set up those game "
-                 "files on the start screen (Game Files).");
+        snprintf(what, sizeof what, "MUA3 Recomp needs MARVEL ULTIMATE ALLIANCE 3 version 4.0.1: the base game with "
+                 "its 4.0.1 update. Set up those game files (GAME FILES in the launcher, or Set up in RecompLauncher).");
     } else if (has("no font for the game's text")) {
         snprintf(head, sizeof head, "No font for the game's text");
-        snprintf(what, sizeof what, "Import the Switch fonts in Settings (Game font), or reinstall LAS Recomp - it "
-                 "comes with a font of its own.");
+        snprintf(what, sizeof what, "Reinstall MUA3 Recomp - it comes with a font of its own - or put the Switch's "
+                 "system fonts in its fonts folder (fonts/README.md).");
     } else if (rt_romfs_files >= ROMFS_FILES &&
                (rt_romfs_missing > 0 ||
                 (game_romfs_bytes(game_version()) && rt_romfs_bytes != game_romfs_bytes(game_version())))) {
         snprintf(head, sizeof head, "Your game files are damaged or changed");
         snprintf(what, sizeof what, "All of the game's files are there, but some don't match the game, and the game "
-                 "stopped when it needed one of them. Copy your game files again, then set them up again on the start "
-                 "screen (Game Files).");
+                 "stopped when it needed one of them. Dump your game files again, then set them up again (GAME FILES in "
+                 "the launcher, or Set up in RecompLauncher).");
     } else if (has("get_terminate") || has("uncaught C++ exception")) {  // (the game threw: recompiled code can't
                                                                          // unwind; runtime/hle/warp.c rt_cxa_throw)
         snprintf(head, sizeof head, "The game ran into an error it couldn't recover from");
-        snprintf(what, sizeof what, "This is a bug in LAS Recomp, not a problem with your game files or PC. %s", report);
+        snprintf(what, sizeof what, "This is a bug in MUA3 Recomp, not a problem with your game files or PC. %s", report);
     } else if (in_gpu_driver(g_pc)) {
         snprintf(head, sizeof head, "Your graphics driver crashed");
         snprintf(what, sizeof what, "Update your graphics driver (NVIDIA, AMD or Intel) and try again. If it keeps "
                  "happening, please report it with the log file below.");
     } else if (has("VK_") || has("Vulkan")) {
         snprintf(head, sizeof head, "Graphics driver error");
-        snprintf(what, sizeof what, "LAS Recomp needs a graphics driver with Vulkan 1.3: install the latest driver for "
+        snprintf(what, sizeof what, "MUA3 Recomp needs a graphics driver with Vulkan 1.3: install the latest driver for "
                  "your GPU (NVIDIA, AMD or Intel). If it keeps happening, please report it with the log file below.");
     } else if (has("out of memory") || has("cannot allocate") || has("alloc failed")) {
         snprintf(head, sizeof head, "Out of memory");
         snprintf(what, sizeof what, "Close other programs and try again.");
     } else if (g_pc && rt_host_fn_name(g_pc, NULL)) {
         snprintf(head, sizeof head, "The game crashed");
-        snprintf(what, sizeof what, "This is a bug in LAS Recomp, not a problem with your game files or PC. %s", report);
+        snprintf(what, sizeof what, "This is a bug in MUA3 Recomp, not a problem with your game files or PC. %s", report);
     } else {
-        snprintf(head, sizeof head, "LAS Recomp stopped because of an error");
+        snprintf(head, sizeof head, "MUA3 Recomp stopped because of an error");
         snprintf(what, sizeof what, "%s", report);
     }
     fprintf(stderr, "[crash] %s\n", head);

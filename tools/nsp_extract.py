@@ -1,11 +1,13 @@
-"""Extract a game from its NSPs with the user's own keys (PFS0 > NCA3 > PFS0/RomFS, an update's RomFS as a Bktr patch).
+"""Extract a game from its NSPs or XCI with the user's own keys (PFS0 / HFS0 > NCA3 > PFS0/RomFS, an update's RomFS as a
+Bktr patch).
 
 Usage: nsp_extract.py <game.nsp> <prod.keys> <outdir> [--update <update.nsp>] [--dlc <dlc.nsp>] [--list]
-                      [--romfs source|extract|none] [--files <text>]
+                      [--romfs source|extract|none] [--files <text>] [--title <id> --build <id> --want <name>]
 
 Writes <outdir>/exefs/* from the program NCA (the update's when given), <outdir>/control/** from the control NCA and
 <outdir>/romfs.src: where the RomFS is in the NSPs, for the runtime to read it in place (or --romfs extract: every
-file to <outdir>/romfs, ~18 GB for MUA3 with its update).
+file to <outdir>/romfs, ~18 GB for MUA3 with its update). --title / --build refuse another game or version, saying
+which in one line, as does an add-on content NSP of another game (the release's setup passes them).
 """
 import argparse
 import bisect
@@ -24,21 +26,25 @@ def load_keys(path):
     for line in open(path, encoding='utf-8'):
         if '=' in line:
             k, v = line.split('=', 1)
-            keys[k.strip()] = bytes.fromhex(v.strip())
+            try:
+                keys[k.strip()] = bytes.fromhex(v.strip())
+            except ValueError:  # (lines that aren't keys)
+                pass
     return keys
 
 
 def pfs0_entries(read, base):
-    """[(name, abs_offset, size)] of a PFS0 at `base`, read via read(off, n)."""
+    """[(name, abs_offset, size)] of a PFS0 (or an XCI's HFS0, whose entries are 0x40 bytes) at `base`."""
     magic, n, strsz, _ = struct.unpack('<4sIII', read(base, 0x10))
-    assert magic == b'PFS0', magic
-    ents = read(base + 0x10, n * 0x18)
-    strs = read(base + 0x10 + n * 0x18, strsz)
-    data = base + 0x10 + n * 0x18 + strsz
+    assert magic in (b'PFS0', b'HFS0'), magic
+    esz = 0x18 if magic == b'PFS0' else 0x40
+    ents = read(base + 0x10, n * esz)
+    strs = read(base + 0x10 + n * esz, strsz)
+    data = base + 0x10 + n * esz + strsz
     out = []
     for i in range(n):
-        off, size, so, _ = struct.unpack_from('<QQII', ents, i * 0x18)
-        name = strs[so:strs.index(b'\0', so)].decode()
+        off, size, so = struct.unpack_from('<QQI', ents, i * esz)
+        name = strs[so:strs.index(b"\0", so)].decode()
         out.append((name, data + off, size))
     return out
 
@@ -277,10 +283,16 @@ def write_romfs_source(path, romfs, sections):
 
 
 def open_nsp(path, keys):
-    """{content kind: Nca} of an NSP."""
+    """{content kind: Nca} of an NSP, or of an XCI (game card image: the NCAs are in its root HFS0's "secure"
+    partition, and offsets stay absolute in the file, so romfs.src can point into the XCI the same way)."""
     f = open(path, 'rb')
     rd = lambda off, n: (f.seek(off), f.read(n))[1]
-    ents = pfs0_entries(rd, 0)
+    if rd(0x100, 4) == b'HEAD':
+        root = struct.unpack('<Q', rd(0x130, 8))[0]
+        parts = {name: off for name, off, _ in pfs0_entries(rd, root)}
+        ents = pfs0_entries(rd, parts['secure'])
+    else:
+        ents = pfs0_entries(rd, 0)
     tickets = {}
     for name, off, size in ents:
         if name.endswith('.tik'):
@@ -299,9 +311,35 @@ def open_nsp(path, keys):
     return ncas
 
 
+def refuse(why):
+    """Exit with `why` as the last line of the output (stdout is buffered when it's a pipe: it goes first)."""
+    sys.stdout.flush()
+    sys.exit(why)
+
+
+def check_copy(a, base, upd):
+    """--title / --build: the player's copy is the right game, and its code the right version, or exit saying which."""
+    for path, ncas, what in ((a.nsp, base, 'The game'), (a.update, upd, 'The update')):
+        if ncas is None:
+            continue
+        if 'program' not in ncas:
+            refuse(f'{what} ({os.path.basename(path)}) holds no game code: is it a DLC or another title\'s file?')
+        tid = ncas['program'].program_id
+        if a.title and tid != int(a.title, 16):
+            refuse(f'{what} ({os.path.basename(path)}) is another game: its title ID is {tid:016X}, '
+                     f'and {a.want} is {int(a.title, 16):016X}.')
+    if a.build:
+        sec = {s.idx: s for s in (upd or base)['program'].sections}[0]
+        main = [(off, size) for name, off, size in pfs0_entries(sec.read, sec.data_off) if name == 'main']
+        build = sec.read(main[0][0] + 0x40, 0x20).hex() if main else ''
+        if not build.startswith(a.build.lower()):
+            refuse(f'This is another version of the game: {a.want} is needed, '
+                     + ('and the update given is a different one.' if upd else 'with its update (none was given).'))
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('nsp', help='the base game')
+    ap.add_argument('nsp', help='the base game: an .nsp or an .xci')
     ap.add_argument('keys')
     ap.add_argument('outdir')
     ap.add_argument('--update', help="the game's update NSP: its code, and its RomFS patched over the base game's")
@@ -311,11 +349,33 @@ def main():
                     help='source (default): write <outdir>/romfs.src, the RomFS read in place from the NSPs; '
                          'extract: copy every file out to <outdir>/romfs')
     ap.add_argument('--files', help='also copy out the RomFS files whose path contains this text')
+    ap.add_argument('--title', help="the game's title ID (hex): any other game is refused, with a one-line reason")
+    ap.add_argument('--build', help="the start of exefs/main's build ID (hex): any other version is refused")
+    ap.add_argument('--want', default='the game',
+                    help='what --title and --build name, for those messages: "MARVEL ULTIMATE ALLIANCE 3 4.0.1"')
     a = ap.parse_args()
     keys = load_keys(a.keys)
-    base = open_nsp(a.nsp, keys)
-    upd = open_nsp(a.update, keys) if a.update else None
-    dlcs = [(d, open_nsp(d, keys)) for d in a.dlc]
+    if a.title or a.build:  # (the release's setup: a wrong copy or keys file is said in one line, not a traceback)
+        try:
+            base = open_nsp(a.nsp, keys)
+            upd = open_nsp(a.update, keys) if a.update else None
+            dlcs = [(d, open_nsp(d, keys)) for d in a.dlc]
+        except KeyError as e:
+            if isinstance(e.args[0], str):
+                refuse(f'Your prod.keys has no {e.args[0]}: dump it again from your Switch, with its current firmware.')
+            refuse('A title key is missing: the NSP has no ticket. Dump the game again with its ticket.')
+        except ValueError:  # (a key of the wrong length)
+            refuse("Your prod.keys couldn't be read: a key in it is damaged. Dump it again from your Switch.")
+        check_copy(a, base, upd)
+        for path, ncas in dlcs:  # (add-on content: the game's title ID + 0x1000 + its index)
+            data = ncas.get('publicdata') or ncas.get('data')
+            if a.title and (not data or (data.program_id & ~0xFFF) != int(a.title, 16) + 0x1000):
+                refuse(f'The add-on content ({os.path.basename(path)}) isn\'t {a.want}\'s: leave it out, or pick that '
+                       'game\'s Expansion Pass.')
+    else:
+        base = open_nsp(a.nsp, keys)
+        upd = open_nsp(a.update, keys) if a.update else None
+        dlcs = [(d, open_nsp(d, keys)) for d in a.dlc]
     if a.list:
         return
     prog = (upd or base)['program']

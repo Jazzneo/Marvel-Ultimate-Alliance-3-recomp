@@ -58,8 +58,12 @@ void game_frame_rate(int fps) {
     }
 }
 
-// ---- version, for the shader caches' tag (runtime/nvn/shader_prep.c)
-const char *larecomp_version(void) { return "mua3-dev"; }
+// ---- version, for the log's [info] line and the shader caches' tag (runtime/nvn/shader_prep.c): the Makefile's
+// VERSION (with -dev in a source build)
+#ifndef MUA3_VERSION
+#define MUA3_VERSION "dev"
+#endif
+const char *larecomp_version(void) { return MUA3_VERSION; }
 
 // ---- input (runtime/hle/input.c)
 bool mirror_input(void) { return false; }
