@@ -20,9 +20,15 @@ your own console.
 
 MUA3 Recomp works with [RecompLauncher](https://recomplauncher.com): install it from the launcher, then give Easy Setup
 your game (NSP or XCI), the 4.0.1 update NSP, the Expansion Pass NSP if you have it, and your `prod.keys`. The setup
-step recompiles the game for your PC (30 to 60 minutes, depending on the CPU; nothing else to install), then Play
+step recompiles the game for your PC (20 to 40 minutes, depending on the CPU; nothing else to install), then Play
 starts it. Video, sound, controller and keyboard settings are on the game's page. Keep your NSP / XCI files where they
-are: the game reads its data from them.
+are: the game reads its data from them. Started from Big Picture mode the game opens full screen (your own window
+setting is kept for other starts), and its menus name your controller's buttons from the first frame.
+
+**Recomp Achievements:** the recomp reports the story's progress to RecompLauncher (the chapter each story movie
+belongs to, and the last one), and the profile shows the chapter you're on. Which achievements those unlock is
+RecompLauncher's list for the game: [docs/achievements.json](docs/achievements.json) is the one proposed (starting the
+story, reaching each of chapters 2 to 11, finishing it). Outside RecompLauncher this does nothing.
 
 ## Play with the release zip
 
@@ -36,11 +42,13 @@ are: the game reads its data from them.
 
 Needs Windows 10 or 11 (64-bit), a CPU with AVX2 (Intel 4th gen / AMD Ryzen or newer), a graphics driver with Vulkan
 1.3, 8 GB of RAM (16 GB or more makes the setup faster: it compiles more files at once) and about 2 GB free for the
-setup (about 0.5 GB stays). The setup took 40 minutes on an 8-core Intel i7-11700F.
+setup (about 0.5 GB stays). The setup took 20 minutes on an 8-core Intel i7-11700F.
 
 ## The launcher
 
-`mua3launcher.exe` (`launcher/launcher.cpp`) has five pages:
+`mua3launcher.exe` (`launcher/launcher.cpp`) is drawn in the game's colours, all made in code (no game art): a cosmic
+night with drifting nebula glows and stars, and six gem colours, one for each page. It has five pages, each usable with
+the mouse, the keyboard or a controller:
 
 - **PLAY**: checks the game files are set up, your NSPs are still where they were, and the PC version is built; PLAY
   saves the settings and starts the game.
@@ -58,7 +66,7 @@ Everything is saved in `larecomp.ini` next to the game, and the launcher only ch
 Default controls - keyboard: WASD left stick, numpad 8 / 5 / 4 / 6 right stick, K / J / L / I the Switch's A / B / X / Y,
 Q / E L / R, 1 / 3 ZL / ZR, Enter Plus, Backspace Minus, arrows the d-pad, F / numpad 0 the stick presses. Controllers
 (Xbox, PlayStation, Switch Pro and more, through SDL 3) map by position, as on the Switch. F1 or Esc (or Home) opens the
-recomp's menu; F11 or Alt+Enter switches fullscreen.
+recomp's menu (Controls, Video, Audio, Quit); F11 or Alt+Enter switches fullscreen.
 
 ## How it works
 
@@ -86,7 +94,7 @@ the runtime reads the data in place from your NSPs (`runtime/romfs_nca.c`).
    `.venv/Scripts/python -I tools/nsp_extract.py "<base>.nsp" "<your prod.keys>" extracted --update "<update>.nsp"
    --dlc "<expansion pass>.nsp"`. Keep the NSPs where they are: the game data is read from them.
 3. In Git Bash with `export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"`:
-   `make gen` (recompile the game code into `generated/`, a few minutes), then `make -j16` (about 25 to 40 minutes
+   `make gen` (recompile the game code into `generated/`, a few minutes), then `make -j16` (about 10 to 20 minutes
    the first time) and `make dlls` (the runtime DLLs next to the programs, so they start from Explorer).
 4. Run: `build/mua3launcher.exe` (or `tools/run.sh`; log: `mua3.log`). Steps 2 and 3 can also be run from the
    launcher's GAME FILES page. The settings are in `larecomp.ini` next to `extracted/`; the in-game menu (F1 or Esc)
@@ -106,8 +114,10 @@ GPL codec libraries or paths of the build machine are inside. Attach it to a Git
 - **LAS Recomp** by Peiikai and contributors (MIT License, `LICENSE.LASRecomp`): the recompiler (`tools/gen.py`,
   `lifter.py`, `nso.py`, `simd_c.py`, ...) and the runtime this project started from.
 - Third-party components keep their own licenses (`third_party/`): Dear ImGui (MIT), SMAA (MIT), the ported audio
-  renderer and shader decoder references (MIT, `third_party/ryujinx/LICENSE.txt`), fonts (SIL OFL 1.1 / DejaVu). The
-  release's bundled components, their licenses and their sources: [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md).
+  renderer and shader decoder references (MIT, `third_party/ryujinx/LICENSE.txt`), fonts (SIL OFL 1.1 / DejaVu; the
+  launcher's display face is Baloo 2), and [Recomp Achievements](https://github.com/elripalda/RecompAchievements) by
+  Ripalda (`third_party/rl_achievements`: its own license, with rcheevos and cJSON under MIT). The release's bundled
+  components, their licenses and their sources: [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md).
 - Libraries: SDL 3, FFmpeg (LGPL, dynamically linked), Vulkan Memory Allocator, shaderc; the generator uses Capstone,
   Unicorn and python-lz4.
 - [Switchbrew](https://switchbrew.org) documentation (NCA/PFS0/RomFS formats for `tools/nsp_extract.py`).

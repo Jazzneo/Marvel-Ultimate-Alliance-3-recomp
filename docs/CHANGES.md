@@ -355,10 +355,61 @@ Expansion Pass.
   finished in 2399 s (extract 0 s, the three modules' C in 57 s, zig: 1023 files 13 at a time, then the link) with the
   same game code library id as the source build; `mua3launcher --play` with the kree route: the opening movie on the
   LGPL FFmpeg, then the first level at 29 fps (51.7k draws a frame, as the source build), saves in `save/`, the log in
-  `mua3recomp.log`. The slowest single file, `glslc_188.c`, sets the setup's floor.
+  `mua3recomp.log`. (Halved since: "Setup time" below.)
 - The launcher's rebinding through `MUA3_LAUNCHER_REBIND` (a swap on the keyboard, a free button on the controller,
   a key taken from another input): the bindings written as the game writes them, every other line of larecomp.ini
   (comments, unknown keys) kept.
+
+## Setup time, Big Picture, Recomp Achievements, the launcher's look, the menu (2026-11-13)
+
+### Setup time: glslc without optimization (`tools/gen.py --optnone`)
+
+- **Found:** single-threaded, the generated C compiles at about 5 s per MB with MSYS2's clang at -O1; 515 MB of it.
+  glslc (NVIDIA's runtime GLSL compiler, `subsdk1`) is 96 MB of that but took 797 s of the 8-job build, half of it:
+  `glslc_188.c` is one 750 KB function (154 s alone) and others like it. `LARECOMP_FNPROF` over `route.sh kree` (boot
+  through the first level) entered 11,061 functions, none of them in glslc (0x7007...): the game doesn't run it.
+- **Changed:** `gen.py --optnone` puts `#pragma clang optimize off` in each chunk; the Makefile's `gen` and the release's
+  setup pass it for glslc only. Correct if it ever runs, just slower there. The game code library's id changes with
+  gen.py, so old libraries are rebuilt.
+- **Result:** glslc's 214 files in 44 s instead of 797 s (8 jobs); the game code from source (`make -j16`) in 631 s
+  instead of about 25 minutes; the release's setup in 1180 s instead of 2399 s on
+  the same machine and files.
+- **Also:** zig compiles with `-g0` (it adds CodeView debug info by default: objects 3x the size, nothing the link
+  keeps). Measured, not changed: zig's clang is ~2x slower per file than MSYS2's, and this 8-core CPU compiles only ~3x
+  faster with 8 jobs than with 1 (no gain past 8).
+- `make dist` refuses a `mua3gen` frozen before a change to the generator's sources (`make gen-helper` again).
+
+### RecompLauncher's Big Picture and controller
+
+- `RECOMPLAUNCHER_MODE=bigpicture`: full screen for that session (`runtime/settings.c`); larecomp.ini keeps the
+  player's own choice (settings_save writes it while the session's is in effect).
+- `RECOMPLAUNCHER_PAD=xbox|playstation`: the recomp's menus name that controller's buttons until the game has opened a
+  controller of its own (`runtime/hle/input.c input_pad_family`).
+
+### Recomp Achievements (`runtime/achievements.c`, `third_party/rl_achievements`)
+
+- The SDK (events mode) vendored unchanged with its license; rcheevos and cJSON built into the exe. Without
+  RecompLauncher (no `RL_SESSION`) every call returns at once.
+- Events: `movie_EV_<chapter><scene>_<cut>` for each story movie the game opens (`runtime/hle/movie.c`), `chapter_NN` the
+  first time a chapter's movies start, and the profile line "Story: chapter N"; a read of a save slot (save00...) is
+  reported as a save loaded. Chapters 01 to 11 and the last movie (EV_1105_01) come from the game's own file names.
+- `docs/achievements.json`: the proposed events list for RecompLauncher to host (12 achievements, 200 points: start the
+  story, reach chapters 2 to 11, finish it). Not verified past chapter 1: nothing here has played further.
+- Checked on Windows with a stand-in for RecompLauncher's pipe: hello, list_ok, `movie_EV_0101_01` and `chapter_01` at
+  frame 3040 (the opening), the presence line - from the source build and from the release.
+
+### The launcher's look
+
+- Drawn in code, in the game's colours (no game art, logos or fonts): an animated cosmic background (indigo to violet,
+  nebula glows, stars), six gem colours - red, orange, blue, purple, green, gold - one for each page's tab, card edge,
+  headings' underline and buttons, faceted gems in the header, the title in gold in Baloo 2 (OFL, shipped). Every page
+  still works with the mouse, the keyboard and a controller. The release's icon is redrawn in the same colours.
+
+### The in-game menu
+
+- Only what MUA3 has: Controls, Video, Audio, Quit. LAS Recomp's save editor, randomizer, warp, cheats, gameplay and
+  cosmetics pages (Link's Awakening's; stubs here) aren't listed, nor its tilt-shift blur, Hero Mode emblem,
+  360-degree movement and health light options. "D-pad moves your hero"; Button icons names the recomp's menus.
 
 ## Status (MUA3, 2026-11-01)
 
@@ -382,7 +433,7 @@ Expansion Pass.
 - **Frame rate:** 30 / 60 / 120 are a setting (above). At 120 the RTX 3080 Ti shows ~70-100 fps in the first level
   while other GPU work runs alongside: the GPU (~8-11 ms a frame, the tiled light culling 3.3 ms of it: its 8.4 MB
   light lists go through the dispatch's device-local copy and back every frame) is the limit now.
-- **Build time:** `generated/glslc/glslc_188.c` alone took over 15 minutes at -O1; splitting that chunk would cut the
-  first build a lot.
+- **Build time:** glslc is now built without optimization (below, "Setup time"). The rest is zig's clang, about twice
+  as slow as MSYS2's on this code, and a CPU that gains little past 8 compilers at once.
 - From DOAX3, still open: `game_in_play` and level hooks (slow-frame classification treats every frame as a load),
   stencil sampling in graphics stages, 8- and 16-bit integer texture formats, swkbd offsets.

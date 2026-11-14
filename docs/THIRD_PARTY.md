@@ -26,6 +26,10 @@ bundled and keep their own licenses. Source code for the exact versions shipped 
 | SMAA (shader and lookup textures, built in) | 2013 | MIT | https://github.com/iryoku/smaa |
 | AMD FidelityFX FSR 1 (built in) | 1.0 | MIT | https://github.com/GPUOpen-Effects/FidelityFX-FSR |
 | Ryujinx-derived code (built in, `third_party/ryujinx`) | - | MIT | https://github.com/Ryujinx/Ryujinx |
+| Recomp Achievements (rl-achievements SDK, built in: achievements and leaderboards through RecompLauncher) | commit faf094a | Recomp Achievements License 1.0 (`RecompAchievements-LICENSE.txt`) | https://github.com/elripalda/RecompAchievements |
+| rcheevos (inside Recomp Achievements) | eea6461 (2026-11-05) | MIT (`rcheevos-LICENSE.txt`) | https://github.com/RetroAchievements/rcheevos |
+| cJSON (inside Recomp Achievements) | 1.7.19 | MIT (`cJSON-LICENSE.txt`) | https://github.com/DaveGamble/cJSON |
+| Baloo 2 font (SemiBold, the launcher's display face) | 1.640 | SIL OFL 1.1 (`Baloo2-OFL.txt`) | https://github.com/EkType/Baloo2 |
 | BIZ UDPGothic font (Regular) | 1.05 | SIL OFL 1.1 (`BIZUDPGothic-OFL.txt`) | https://github.com/googlefonts/morisawa-biz-ud-gothic |
 | DejaVu Sans font (Book, Bold) | 2.37 | Bitstream Vera license (`DejaVu-LICENSE.txt`) | https://github.com/dejavu-fonts/dejavu-fonts/releases/tag/version_2_37 |
 

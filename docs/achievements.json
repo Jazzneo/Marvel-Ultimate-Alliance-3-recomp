@@ -1,0 +1,105 @@
+{
+  "format": 1,
+  "game": "mua3-recomp",
+  "source": "events",
+  "console": "switch",
+  "versions": ">=0.1.0",
+  "achievements": [
+    {
+      "id": 1,
+      "title": "Assembled",
+      "description": "Start the story",
+      "points": 5,
+      "type": "progression",
+      "event": "chapter_01"
+    },
+    {
+      "id": 2,
+      "title": "Chapter 2",
+      "description": "Finish chapter 1 of the story",
+      "points": 10,
+      "type": "progression",
+      "event": "chapter_02"
+    },
+    {
+      "id": 3,
+      "title": "Chapter 3",
+      "description": "Finish chapter 2 of the story",
+      "points": 10,
+      "type": "progression",
+      "event": "chapter_03"
+    },
+    {
+      "id": 4,
+      "title": "Chapter 4",
+      "description": "Finish chapter 3 of the story",
+      "points": 10,
+      "type": "progression",
+      "event": "chapter_04"
+    },
+    {
+      "id": 5,
+      "title": "Chapter 5",
+      "description": "Finish chapter 4 of the story",
+      "points": 10,
+      "type": "progression",
+      "event": "chapter_05"
+    },
+    {
+      "id": 6,
+      "title": "Chapter 6",
+      "description": "Finish chapter 5 of the story",
+      "points": 10,
+      "type": "progression",
+      "event": "chapter_06"
+    },
+    {
+      "id": 7,
+      "title": "Chapter 7",
+      "description": "Finish chapter 6 of the story",
+      "points": 10,
+      "type": "progression",
+      "event": "chapter_07"
+    },
+    {
+      "id": 8,
+      "title": "Chapter 8",
+      "description": "Finish chapter 7 of the story",
+      "points": 10,
+      "type": "progression",
+      "event": "chapter_08"
+    },
+    {
+      "id": 9,
+      "title": "Chapter 9",
+      "description": "Finish chapter 8 of the story",
+      "points": 25,
+      "type": "progression",
+      "event": "chapter_09"
+    },
+    {
+      "id": 10,
+      "title": "Chapter 10",
+      "description": "Finish chapter 9 of the story",
+      "points": 25,
+      "type": "progression",
+      "event": "chapter_10"
+    },
+    {
+      "id": 11,
+      "title": "Chapter 11",
+      "description": "Finish chapter 10 of the story",
+      "points": 25,
+      "type": "progression",
+      "event": "chapter_11"
+    },
+    {
+      "id": 12,
+      "title": "Credits",
+      "description": "Finish the story",
+      "points": 50,
+      "type": "win",
+      "event": "movie_EV_1105_01"
+    }
+  ]
+}
