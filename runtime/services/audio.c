@@ -612,6 +612,12 @@ static void mix_ramp(Mix *dst, const float *smp, uint32_t N, float v0, float v1,
     }
 }
 
+static bool split_log(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_AUDIO_SPLIT_LOG") != NULL;
+    return on;
+}
+
 // The mixes a sub mix sends to: its destination mix, or its splitter's destinations' mixes. n: how many (in ids).
 static int mix_targets(Renderer *r, const Mix *s, int32_t *ids, int max) {
     int n = 0;
@@ -760,6 +766,24 @@ static void render_frame(Renderer *r, float *stereo) {
                         for (uint32_t x = 0; x < N; x++) o[x] += src[x] * g;
                     }
                 }
+            }
+        }
+    }
+    {   // LARECOMP_AUDIO_MIXLEVEL=1: each used mix's loudest sample (all it received) over the last 200 frames (~1 s)
+        static int on = -1;
+        static float peak[64];
+        if (on < 0) on = getenv("LARECOMP_AUDIO_MIXLEVEL") != NULL;
+        if (on) {
+            for (uint32_t m = 0; m < r->nmix && m < 64; m++)
+                if (r->mix[m].used && r->mix[m].buf)
+                    for (uint32_t i = 0; i < r->mix[m].bufs * N; i++)
+                        if (fabsf(r->mix[m].buf[i]) > peak[m]) peak[m] = fabsf(r->mix[m].buf[i]);
+            if (r->elapsed_frames % 200 == 0) {
+                LOG("[audren] mix levels f%llu:", (unsigned long long)r->elapsed_frames);
+                for (uint32_t m = 0; m < r->nmix && m < 64; m++)
+                    if (r->mix[m].used) LOG(" %u=%.0f", m, peak[m]);
+                LOG("\n");
+                memset(peak, 0, sizeof peak);
             }
         }
     }
@@ -1084,7 +1108,15 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
     if (r->splitters && *(const uint32_t *)min == 0x48444E53) {  // splitters ('SNDH'), between the effects and mixes
         const uint8_t *sp_ = min + 0x20, *end = sin - mixes_sz;
         uint32_t ninfo = ((const uint32_t *)min)[1], ndata = ((const uint32_t *)min)[2];
-        for (uint32_t i = 0; i < ninfo && sp_ + 0x10 <= end; i++) {  // 'SNDI': id, sample rate, count, then the data ids
+        // Each 'SNDI' is followed by unused bytes after its destination ids (Ryujinx: 12), so the next record - another
+        // 'SNDI', or the first 'SNDD' - is found by its tag within the next 32 bytes. (Read as packed, the destinations
+        // after the first info were never found: every sub mix routed by a splitter past the first went silent -
+        // MUA3's voices, mix 14 by splitter 5.)
+        #define SEEK_TAG(p, tag) do { const uint8_t *q_ = (p); \
+            for (int s_ = 0; s_ <= 32 && q_ + 4 <= end; s_ += 4, q_ += 4) if (*(const uint32_t *)q_ == (tag)) { (p) = q_; break; } } while (0)
+        uint32_t ni = 0, nd = 0;  // (how many were read: fewer than the header's counts is a layout misread)
+        for (uint32_t i = 0; i < ninfo && sp_ + 0x10 <= end; i++, ni++) {  // 'SNDI': id, sample rate, count, data ids
+            if (i) SEEK_TAG(sp_, 0x49444E53u);
             const uint32_t *w = (const uint32_t *)sp_;
             if (w[0] != 0x49444E53) break;
             uint32_t id = w[1], n = w[3];
@@ -1093,12 +1125,20 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
                 SplitInfo *si = &r->sinfo[id];
                 si->ndest = n < SPLIT_DEST_MAX ? n : SPLIT_DEST_MAX;
                 memcpy(si->dest, w + 4, si->ndest * 4);
+                if (split_log()) {  // LARECOMP_AUDIO_SPLIT_LOG=1: each splitter info and destination as it's sent
+                    LOG("[audren] splitter %u: %u destinations:", id, n);
+                    for (uint32_t k = 0; k < si->ndest; k++) LOG(" %d", si->dest[k]);
+                    LOG("\n");
+                }
             }
             sp_ += 0x10 + 4ull * n;
         }
+        if (ndata) SEEK_TAG(sp_, 0x44444E53u);
+        #undef SEEK_TAG
         for (uint32_t i = 0; i < ndata && sp_ + 0x70 <= end; i++, sp_ += 0x70) {  // 'SNDD': id, volume[24], mix, in use
             const uint32_t *w = (const uint32_t *)sp_;
             if (w[0] != 0x44444E53) break;
+            nd++;
             uint32_t id = w[1];
             if (id >= r->splitter_dests) continue;
             SplitDest *d = &r->sdest[id];
@@ -1107,9 +1147,16 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
             memcpy(&d->mix_id, sp_ + 0x68, 4);
             d->in_use = sp_[0x6C];
             if (d->in_use && !was) memcpy(d->prev, d->vol, sizeof d->prev);  // (no ramp from silence on a new route)
+            if (split_log())
+                LOG("[audren] splitter destination %u: mix %d in use %u vol %.3f %.3f %.3f %.3f %.3f %.3f\n", id, d->mix_id,
+                    d->in_use, d->vol[0], d->vol[1], d->vol[2], d->vol[3], d->vol[4], d->vol[5]);
         }
         static int logged;
         if (!logged++) LOG("[audren] splitters: %u infos, %u destinations\n", ninfo, ndata);
+        static int short_logs;
+        if ((ni < ninfo || nd < ndata) && short_logs++ < 5)
+            LOG("[audren] splitters: read %u of %u infos, %u of %u destinations (next word %08x, %td bytes left)\n", ni, ninfo,
+                nd, ndata, sp_ + 4 <= end ? *(const uint32_t *)sp_ : 0, end - sp_);
     }
     min = sin - mixes_sz;
     if ((r->revision >> 24) - '0' >= 7 && *(const uint32_t *)min == 0xCAFEBABE) {

@@ -5434,7 +5434,10 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
         bool ok = translate_program_now(p);
         p->code[0] = p->code[1] = 0;  // (the game files' copies are gone after this call)
         PREP_PUT(prep_progs, ck, p);  // (failed ones too: the game then skips them as it would its own)
-        if (!ok) return false;
+        // A failed translation is never compiled, so it's marked failed here: else a later record with the same
+        // program queued a pipeline that waited forever for that compile, and the preparation never ended (the game
+        // stayed on a black window at every start once such a shader was in the player's cache/shader_seen.txt)
+        if (!ok) { atomic_store(&p->state, 2); return false; }
         prep_job(compile_program, p);
     }
     if (atomic_load(&p->state) == 2) return false;

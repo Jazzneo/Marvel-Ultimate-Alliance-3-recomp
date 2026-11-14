@@ -659,11 +659,22 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
         free(df);
         if (progress && (++done & 7) == 0) progress(done - renderer_prepare_pending(), total + 1);
     }
+    // The last builds, waited for - but not past LARECOMP_SHADER_PREP_WAIT ms (15000; -1: no limit). A single pipeline
+    // can take the driver minutes (NVIDIA: ~100 s for one of the first level's, seen on an RTX 3060), and the boot's
+    // preparation runs before the game's first frame: past the limit the game starts, and the builds still going
+    // finish in the background - a draw whose prepared pipeline isn't ready is skipped, as with the game's own builds.
+    static long wait_cap = -2;
+    if (wait_cap == -2) wait_cap = getenv("LARECOMP_SHADER_PREP_WAIT") ? atol(getenv("LARECOMP_SHADER_PREP_WAIT")) : 15000;
+    double t_wait = ms_now();
+    bool left = false;
     while (!(cancel && *cancel) && renderer_prepare_pending()) {  // (the last builds)
         if (progress) progress(done - renderer_prepare_pending(), total + 1);
+        if (wait_cap >= 0 && ms_now() - t_wait > wait_cap) { left = true; break; }
         struct timespec ts = {0, 5000000};
         nanosleep(&ts, NULL);
     }
+    if (left) LOG("[shader] preparation: %d builds still going after %ld ms: the game starts, they finish in the background\n",
+                  renderer_prepare_pending(), wait_cap);
     if (!(cancel && *cancel)) renderer_prepare_end();
     if (progress) progress(total + 1, total + 1);
     for (int i = 0; i < idx_nfiles; i++) if (files[i]) fclose(files[i]);
@@ -675,8 +686,15 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     return true;
 }
 
+// The boot's preparation, for the window's title (runtime/nvn/vulkan/device.c ui_run): done / total, 0 / 0 when none
+_Atomic int g_shader_prep_done, g_shader_prep_total;
+static void boot_progress(int done, int total) {
+    atomic_store(&g_shader_prep_total, total);
+    atomic_store(&g_shader_prep_done, done);
+}
 void shader_prep_boot(const char *romfs) {
     const char *e = getenv("LARECOMP_SHADER_PREP");  // (on by default: no start screen runs it here; =0 off)
     if (e && !atoi(e)) return;
-    shader_prep_run(romfs, NULL, NULL);
+    shader_prep_run(romfs, boot_progress, NULL);
+    atomic_store(&g_shader_prep_total, 0);  // (done: the title back to the game's name)
 }

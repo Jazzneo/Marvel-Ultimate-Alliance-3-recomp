@@ -1372,5 +1372,18 @@ int ui_run(void) {
         menu_apply_window_requests(window);
         input_rumble_poll();
         input_led_poll();
+        {   // the boot's shader preparation (runtime/nvn/shader_prep.c): its progress in the title, not a silent black window
+            extern _Atomic int g_shader_prep_done, g_shader_prep_total;
+            static int shown = -2;
+            int total = atomic_load(&g_shader_prep_total);
+            int pct = total > 0 ? atomic_load(&g_shader_prep_done) * 100 / total : -1;
+            if (pct != shown) {
+                shown = pct;
+                char t[128];
+                if (pct >= 0) snprintf(t, sizeof t, "Marvel Ultimate Alliance 3 Recomp - preparing shaders %d%%", pct);
+                else snprintf(t, sizeof t, "Marvel Ultimate Alliance 3 Recomp");
+                SDL_SetWindowTitle(window, t);
+            }
+        }
     }
 }

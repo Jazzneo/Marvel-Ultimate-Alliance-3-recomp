@@ -170,6 +170,9 @@ Added in this project:
 | `LARECOMP_AUX_LOG=1` | Aux send/return levels every 1000 frames |
 | `LARECOMP_AUX_CAPTURE=<file>` | save Aux channel 0's input and output |
 | `LARECOMP_AUDIO_LEVEL=1` | output peak and RMS about once a second |
+| `LARECOMP_AUDIO_MIXLEVEL=1` | each mix's peak (everything it received) about once a second |
+| `LARECOMP_AUDIO_SPLIT_LOG=1` | each splitter info and destination (mix, volumes) as the game sends it |
+| `LARECOMP_SHADER_PREP_WAIT=<ms>` | how long startup waits for the last prepared shaders' builds (15000; -1: no limit) |
 | `LARECOMP_LOG_STAGES=<n>` | the first n shaders' headers and their stages |
 | `LARECOMP_SHADER_SURVEY=1` | log every unknown instruction in a shader |
 | `LARECOMP_PRESENT_PACE=0` | uncapped frame rate |
@@ -410,6 +413,38 @@ Expansion Pass.
 - Only what MUA3 has: Controls, Video, Audio, Quit. LAS Recomp's save editor, randomizer, warp, cheats, gameplay and
   cosmetics pages (Link's Awakening's; stubs here) aren't listed, nor its tilt-shift blur, Hero Mode emblem,
   360-degree movement and health light options. "D-pad moves your hero"; Button icons names the recomp's menus.
+
+## Dialogue voices, and a black window at startup (2026-11-13)
+
+### No voices in dialogue: splitter destinations were never read (`runtime/services/audio.c`)
+
+- **Seen:** the dialogue's text shows ("We should probably get moving.") and the game reads its voice data
+  (`SOUND/Stream_Voice.ktsl2stbin`, KTSR like the music) as each line starts, and a renderer voice plays it (ADPCM,
+  32 kHz mono) into a sub mix of its own (14, 15, 16, ... in turn) - but nothing is heard.
+- **Found:** those sub mixes send through splitters (mix 14: splitter 5), and the splitter destinations they use were
+  never set: `LARECOMP_AUDIO_SPLIT_LOG` showed every RequestUpdate's splitter section read only as far as its first
+  'SNDI'. Each splitter info is followed by unused bytes after its destination ids (Ryujinx notes 12), so read as
+  packed, the next record wasn't where it was looked for and every destination after it was dropped.
+- **Changed:** the next 'SNDI' / the first 'SNDD' are found by their tag right after each info. Now every update reads
+  in full; a line's mix goes to the voice bus (mix 4, at 0.251) and on through mix 9 to the final mix:
+  `LARECOMP_AUDIO_MIXLEVEL` shows the dialogue's mixes at ~16000 and mix 4 at ~4100 while a line plays (it got
+  nothing before). Splitter 4's sound (mix 13, to mix 1) was silent the same way.
+
+### Black window at startup: one shader build of ~100 s (`runtime/nvn/shader_prep.c`, `vulkan/exec.c`, `device.c`)
+
+- **Seen:** after a session that reached the first level, every start stayed on a black window (the player's frame
+  rate change only restarted it). The hang watch: no frame presented; the main thread in `nvnDeviceInitialize`.
+- **Found** (gdb on the stuck process, the data folder bisected): the boot's shader preparation (the player's
+  `cache/shader_seen.txt` with `cache/shader_code/`) waited for its last builds, and one pipeline sat in NVIDIA's
+  compiler (`nvgpucomp64.dll`) for ~100 s on an RTX 3060; preparation then finished and the game ran. Once the driver
+  had cached that pipeline, starts took under a second.
+- **Changed:** startup waits for the last builds at most `LARECOMP_SHADER_PREP_WAIT` ms (15000); the rest finish in
+  the background, and a draw whose prepared pipeline isn't ready is skipped, as with the game's own first builds. The
+  window's title shows "preparing shaders N%" while it runs. Also: a program whose translation fails is marked failed
+  at once (it stayed "not built", and a later record with the same program would have waited for it forever).
+- Checked: the reproducing cache (copied to a scratch data folder) with `LARECOMP_SHADER_PREP_WAIT=0`: 6 builds left to
+  the background, the title at 29 fps; the player's own settings and cache: preparation 690 ms, 57 fps at 60;
+  `route.sh kree` into the first level, no crash.
 
 ## Status (MUA3, 2026-11-01)
 
