@@ -284,6 +284,8 @@ static void ex_open_path(Cpu *c, const char *path) {
     char host[1024];
     snprintf(host, sizeof host, "%s/%s", g_romfs_dir, rel ? rel : "");
     LOG("[movie] open %s -> %s\n", path ? path : "(null)", host);
+    { extern void achievements_movie(const char *path);  // runtime/achievements.c: the story's progress
+      achievements_movie(rel); }
     { extern void pace_hitch(const char *why);  // nvn/pace.c
       pace_hitch("a movie"); }
     struct stat sb;

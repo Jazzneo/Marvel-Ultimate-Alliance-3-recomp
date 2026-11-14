@@ -22,7 +22,8 @@ OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S 
 GENARCH  ?= -march=x86-64-v3  # AVX2 + FMA for the lifted FP/SIMD code (simd.h)
 GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime \
             -D_FILE_OFFSET_BITS=64 $(GENARCH)
-RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn $(OSFLAGS)
+RL_ACH   := third_party/rl_achievements
+RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Iruntime/nvn -I$(RL_ACH)/include $(OSFLAGS)
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn $(OSFLAGS)
 LDFLAGS  := -fuse-ld=lld $(if $(DEPS),-L$(DEPS)/lib) -Wl,--stack,16777216 -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
             $(if $(RELEASE),-Wl$(comma)--subsystem$(comma)windows -Wl$(comma)--strip-debug) \
@@ -44,6 +45,10 @@ UI_SRC   := $(wildcard runtime/ui/*.mm)
 RT_OBJ   := $(patsubst runtime/%.c,$(B)/rt/%.o,$(RT_SRC))
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
 UI_OBJ   := $(patsubst runtime/%.mm,$(B)/rt/%.o,$(UI_SRC))
+# Recomp Achievements (RecompLauncher's; runtime/achievements.c): the SDK and its rcheevos / cJSON, as shipped upstream
+RL_SRC   := $(RL_ACH)/src/rl_achievements.c $(RL_ACH)/third_party/cjson/cJSON.c \
+            $(wildcard $(RL_ACH)/third_party/rcheevos/src/runtime/*.c $(RL_ACH)/third_party/rcheevos/src/util/*.c)
+RL_OBJ   := $(patsubst $(RL_ACH)/%.c,$(B)/rl/%.o,$(RL_SRC))
 IMGUI_OBJ := $(B)/imgui/imgui.o $(B)/imgui/imgui_draw.o $(B)/imgui/imgui_tables.o $(B)/imgui/imgui_widgets.o \
              $(B)/imgui/imgui_impl_sdl3.o $(B)/imgui/imgui_impl_vulkan.o
 
@@ -67,7 +72,7 @@ all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 gen:
 	cd tools && ../$(PY) gen.py game ../extracted/exefs/main 0x7000000000 ../$(GEN)/game --simd c
 	cd tools && ../$(PY) gen.py sdk ../extracted/exefs/sdk 0x7006000000 ../$(GEN)/sdk --hle ../runtime/hle/hle_symbols.txt --simd c
-	cd tools && ../$(PY) gen.py glslc ../extracted/exefs/subsdk1 0x7007000000 ../$(GEN)/glslc --simd c
+	cd tools && ../$(PY) gen.py glslc ../extracted/exefs/subsdk1 0x7007000000 ../$(GEN)/glslc --simd c --optnone
 
 $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h
 	@mkdir -p $(dir $@)
@@ -120,7 +125,12 @@ $(B)/imgui/imgui_impl_%.o: $(IMGUI)/backends/imgui_impl_%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(ICON_RES)
+$(B)/rl/%.o: $(RL_ACH)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -w -DRC_DISABLE_LUA -I$(RL_ACH)/include -I$(RL_ACH)/third_party/rcheevos/include \
+	    -I$(RL_ACH)/third_party/rcheevos/src -I$(RL_ACH)/third_party/cjson $(OSFLAGS) -c $< -o $@
+
+$(EXE): $(RT_OBJ) $(BACKEND_OBJ) $(UI_OBJ) $(IMGUI_OBJ) $(RL_OBJ) $(ICON_RES)
 	@mkdir -p $(dir $@)link
 	$(CXX) -o $(dir $@)link/$(notdir $@) $^ $(LDFLAGS)
 	mv -f $(dir $@)link/$(notdir $@) $@
@@ -187,6 +197,8 @@ build/gen-venv/.ok:
 dist:
 	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
 	@[ -f build/helper/mua3gen/mua3gen.exe ] || { echo "make gen-helper first (the extractor and generator)"; exit 1; }
+	@! find $(GAMELIB_SRCS) tools/nsp_extract.py tools/mua3gen.py -newer build/helper/mua3gen/mua3gen.exe | grep . || \
+	    { echo "^ changed since mua3gen was frozen: make gen-helper again"; exit 1; }
 	@[ -x build/zig/zig.exe ] || { echo "tools/fetch_zig.sh first (the compiler)"; exit 1; }
 	$(MAKE) B=$(WIN_B) DEPS=$(CURDIR)/build/deps-win RELEASE=1 GEN=build/no-generated-code \
 	    $(WIN_B)/mua3recomp.exe $(WIN_B)/mua3launcher.exe
@@ -204,6 +216,11 @@ dist:
 	cp third_party/fonts/DejaVu/LICENSE "$(DIST)/DejaVu-LICENSE.txt"
 	cp third_party/fonts/BIZUDPGothic/BIZUDPGothic-Regular.ttf "$(DIST)/"
 	cp third_party/fonts/BIZUDPGothic/OFL.txt "$(DIST)/BIZUDPGothic-OFL.txt"
+	cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$(DIST)/"
+	cp third_party/fonts/Baloo2/OFL.txt "$(DIST)/Baloo2-OFL.txt"
+	cp $(RL_ACH)/LICENSE "$(DIST)/RecompAchievements-LICENSE.txt"
+	cp $(RL_ACH)/third_party/rcheevos/LICENSE "$(DIST)/rcheevos-LICENSE.txt"
+	cp $(RL_ACH)/third_party/cjson/LICENSE "$(DIST)/cJSON-LICENSE.txt"
 	cp README.md LICENSE.LASRecomp recomplauncher.json "$(DIST)/"
 	cp docs/THIRD_PARTY.md "$(DIST)/THIRD_PARTY.txt"
 	PATH="$(CURDIR)/build/deps-win/bin:$$PATH" ldd $(WIN_B)/mua3recomp.exe $(WIN_B)/mua3launcher.exe | \

@@ -50,10 +50,21 @@
 #define GAME_BUILD_ID "e853c44fdf18b88f"
 #define GAME_WANT "MARVEL ULTIMATE ALLIANCE 3 4.0.1"
 
-// ================================================================== palette (the launcher's look: night blue, red, gold)
-static const ImVec4 C_GOLD(1.0f, 0.78f, 0.15f, 1), C_RED(0.72f, 0.10f, 0.10f, 1), C_RED_HI(0.86f, 0.16f, 0.16f, 1);
-static const ImVec4 C_GREY(0.65f, 0.68f, 0.75f, 1), C_OK(0.45f, 0.85f, 0.45f, 1), C_WARN(1.0f, 0.6f, 0.3f, 1);
-static const ImVec4 C_CYAN(0.45f, 0.80f, 1.0f, 1);
+// ================================================================== palette
+// The game's own colours, all drawn here (no game art, logos or fonts): a cosmic night - deep indigo to violet, nebula
+// glows, stars - and six gem colours, one for each page (red, orange, blue, purple, green; gold for the title).
+static const ImVec4 C_GOLD(1.0f, 0.80f, 0.22f, 1), C_RED(0.86f, 0.13f, 0.24f, 1), C_RED_HI(1.0f, 0.27f, 0.36f, 1);
+static const ImVec4 C_GREY(0.72f, 0.70f, 0.86f, 1), C_OK(0.30f, 0.88f, 0.55f, 1), C_WARN(1.0f, 0.64f, 0.30f, 1);
+static const ImVec4 C_CYAN(0.42f, 0.86f, 1.0f, 1);
+static const ImVec4 k_gem[6] = {
+    {0.92f, 0.16f, 0.27f, 1}, {1.0f, 0.55f, 0.13f, 1}, {0.22f, 0.52f, 1.0f, 1},   // red, orange, blue
+    {0.64f, 0.32f, 1.0f, 1},  {0.20f, 0.82f, 0.46f, 1}, {1.0f, 0.80f, 0.20f, 1},  // purple, green, gold
+};
+static int g_page;  // (the page shown: its gem colour is the accent)
+static ImVec4 accent(float a = 1) { ImVec4 c = k_gem[g_page % 6]; c.w = a; return c; }
+static ImVec4 mix(ImVec4 a, ImVec4 b, float t) {
+    return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t);
+}
 
 // ================================================================== paths
 static std::string g_exe_dir, g_root;  // (the launcher's folder; the data folder, both ending in a separator)
@@ -721,7 +732,7 @@ static int build_gamelib(void) {
         }
         flags += " " + f;
     }
-    flags += " " + q("-I" + g_exe_dir + "gamelib-src");
+    flags += " -g0 " + q("-I" + g_exe_dir + "gamelib-src");  // (-g0: zig adds debug info by default, 3x the objects)
     std::string zc = work + "zig-cache";
     SetEnvironmentVariableA("ZIG_GLOBAL_CACHE_DIR", zc.c_str());
     SetEnvironmentVariableA("ZIG_LOCAL_CACHE_DIR", zc.c_str());
@@ -892,8 +903,8 @@ static void release_steps(bool extract, bool recompile, bool build) {
                                               q(g_exe_dir + "gamelib-src\\hle_symbols.txt") + " --simd c", g_root, false};
         s.weight = 0.5;
         g_steps.push_back(s);
-        s = {"Recompile the shader compiler", gen + " gen glslc extracted\\exefs\\subsdk1 0x7007000000 generated\\glslc --simd c",
-             g_root, false};
+        s = {"Recompile the shader compiler", gen + " gen glslc extracted\\exefs\\subsdk1 0x7007000000 generated\\glslc --simd c "
+                                                  "--optnone", g_root, false};  // (the Makefile's gen, the same)
         s.weight = 0.5;
         g_steps.push_back(s);
     }
@@ -987,18 +998,72 @@ static std::string launch_game(int *wait_code = nullptr) {
 
 // ================================================================== UI helpers
 static float g_scale = 1;
-static ImFont *f_body, *f_small, *f_big;
+static ImFont *f_body, *f_small, *f_big, *f_head, *f_title;  // (f_head, f_title: the display face, Baloo 2)
 static std::string g_flash;
 static double g_flash_until;
 static void flash(const std::string &s) { g_flash = s; g_flash_until = ImGui::GetTime() + 6; }
+static ImU32 U(ImVec4 c, float a = -1) { if (a >= 0) c.w = a; return ImGui::GetColorU32(c); }
 
-static void section(const char *title) {
+// A soft glow: discs from the edge in, each adding a little of the colour
+static void glow(ImDrawList *dl, ImVec2 c, float r, ImVec4 col, float alpha) {
+    for (int i = 0; i < 16; i++) dl->AddCircleFilled(c, r * (1 - i / 16.0f), U(col, alpha / 16), 48);
+}
+static uint32_t hash32(uint32_t x) { x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; return x ^ (x >> 16); }
+
+// The background: a cosmic night - indigo to violet, slow-drifting nebula glows in the gem colours, twinkling stars
+static void cosmos(ImDrawList *dl, ImVec2 s, float t) {
+    dl->AddRectFilledMultiColor(ImVec2(0, 0), s, IM_COL32(12, 10, 36, 255), IM_COL32(28, 12, 58, 255),
+                                IM_COL32(40, 10, 52, 255), IM_COL32(8, 14, 44, 255));
+    struct { float x, y, r; int gem; float a, speed; } neb[] = {
+        {0.12f, 0.22f, 0.55f, 3, 0.55f, 0.050f}, {0.88f, 0.10f, 0.42f, 0, 0.30f, 0.037f},
+        {0.78f, 0.88f, 0.50f, 2, 0.40f, 0.043f}, {0.30f, 0.95f, 0.30f, 4, 0.16f, 0.061f},
+        {0.55f, 0.45f, 0.35f, 3, 0.18f, 0.029f},
+    };
+    float big = std::max(s.x, s.y);
+    for (auto &n : neb) {
+        ImVec2 c(s.x * (n.x + 0.04f * sinf(t * n.speed * 6.28f)), s.y * (n.y + 0.04f * cosf(t * n.speed * 5.1f)));
+        glow(dl, c, big * n.r, k_gem[n.gem], n.a);
+    }
+    for (uint32_t i = 0; i < 170; i++) {  // stars: placed by a hash, each twinkling at its own pace
+        uint32_t h = hash32(i * 2654435761u + 17);
+        ImVec2 p(s.x * (h & 0xffff) / 65535.0f, s.y * (h >> 16) / 65535.0f);
+        float tw = 0.55f + 0.45f * sinf(t * (0.6f + (h % 7) * 0.25f) + i);
+        float r = (i % 23 == 0 ? 1.8f : i % 5 == 0 ? 1.2f : 0.8f) * g_scale;
+        dl->AddCircleFilled(p, r, IM_COL32(235, 230, 255, (int)(200 * tw)), 8);
+        if (i % 23 == 0) {  // (a few bright ones with a glint)
+            float g = 6 * g_scale * tw;
+            dl->AddLine(ImVec2(p.x - g, p.y), ImVec2(p.x + g, p.y), IM_COL32(255, 245, 220, (int)(120 * tw)), 1);
+            dl->AddLine(ImVec2(p.x, p.y - g), ImVec2(p.x, p.y + g), IM_COL32(255, 245, 220, (int)(120 * tw)), 1);
+        }
+    }
+}
+
+// A faceted gem: a hexagon in the colour, a lighter facet up-left, a darker one down-right, a glint
+static void gem(ImDrawList *dl, ImVec2 c, float r, ImVec4 col, float glow_a = 0.35f) {
+    glow(dl, c, r * 2.6f, col, glow_a);
+    ImVec2 v[6];
+    for (int i = 0; i < 6; i++) v[i] = ImVec2(c.x + r * cosf(i * 1.0472f + 0.5236f), c.y + r * sinf(i * 1.0472f + 0.5236f));
+    dl->AddConvexPolyFilled(v, 6, U(col));
+    ImVec4 light = mix(col, ImVec4(1, 1, 1, 1), 0.45f), dark = mix(col, ImVec4(0, 0, 0, 1), 0.35f);
+    dl->AddTriangleFilled(c, v[3], v[4], U(light));
+    dl->AddTriangleFilled(c, v[4], v[5], U(mix(col, ImVec4(1, 1, 1, 1), 0.25f)));
+    dl->AddTriangleFilled(c, v[0], v[1], U(dark));
+    dl->AddTriangleFilled(c, v[1], v[2], U(mix(col, ImVec4(0, 0, 0, 1), 0.2f)));
+    dl->AddPolyline(v, 6, U(light, 0.9f), ImDrawFlags_Closed, 1.2f * g_scale);
+    dl->AddCircleFilled(ImVec2(c.x - r * 0.3f, c.y - r * 0.35f), r * 0.14f, IM_COL32(255, 255, 255, 220), 8);
+}
+
+static void section(const char *title, float width = 0) {  // a heading in the display face, an underline in the accent
     ImGui::Spacing();
-    ImGui::PushStyleColor(ImGuiCol_Text, C_GOLD);
-    ImGui::TextUnformatted(title);
-    ImGui::PopStyleColor();
-    ImGui::Separator();
-    ImGui::Spacing();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float fs = f_head->FontSize;
+    dl->AddText(f_head, fs, ImVec2(p.x + 1.5f * g_scale, p.y + 1.5f * g_scale), IM_COL32(0, 0, 0, 160), title);
+    dl->AddText(f_head, fs, p, U(C_GOLD), title);
+    float w = width > 0 ? width : ImGui::GetContentRegionAvail().x, y = p.y + fs + 3 * g_scale;
+    dl->AddRectFilledMultiColor(ImVec2(p.x, y), ImVec2(p.x + w, y + 2 * g_scale), U(accent()), U(accent(0)), U(accent(0)),
+                                U(accent()));
+    ImGui::Dummy(ImVec2(w, fs + 8 * g_scale));
 }
 static void hint(const char *text) {
     ImGui::PushStyleColor(ImGuiCol_Text, C_GREY);
@@ -1038,15 +1103,36 @@ static void check_mark(bool ok, bool busy = false, bool pending = false) {  // a
     ImGui::Dummy(ImVec2(r * 2 + 6 * g_scale, 0));
     ImGui::SameLine();
 }
-static bool red_button(const char *label, ImVec2 size, bool enabled = true) {
+// A gem-coloured button: a gradient from the colour to a deeper shade, a light rim, a glow when it's hovered or has
+// the controller's focus; greyed out when it can't be pressed
+static bool gem_button(const char *label, ImVec2 size, ImVec4 col, bool enabled = true, ImFont *font = nullptr) {
     ImGui::BeginDisabled(!enabled);
-    ImGui::PushStyleColor(ImGuiCol_Button, C_RED);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, C_RED_HI);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, C_RED_HI);
-    bool r = ImGui::Button(label, size);
-    ImGui::PopStyleColor(3);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    bool pressed = ImGui::InvisibleButton(label, size);
+    bool hot = enabled && (ImGui::IsItemHovered() || ImGui::IsItemFocused()), held = enabled && ImGui::IsItemActive();
     ImGui::EndDisabled();
-    return r;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    if (!enabled) col = mix(col, ImVec4(0.35f, 0.33f, 0.45f, 1), 0.75f);
+    float rr = 8 * g_scale;
+    ImVec2 q(p.x + size.x, p.y + size.y);
+    if (hot) for (int i = 4; i >= 1; i--)
+        dl->AddRect(ImVec2(p.x - i * 2.0f, p.y - i * 2.0f), ImVec2(q.x + i * 2.0f, q.y + i * 2.0f), U(col, 0.10f), rr + i * 2.0f,
+                    0, 2.5f * g_scale);
+    ImVec4 top = mix(col, ImVec4(1, 1, 1, 1), hot ? 0.28f : 0.12f), bottom = mix(col, ImVec4(0, 0, 0, 1), held ? 0.5f : 0.35f);
+    dl->AddRectFilled(p, q, U(bottom), rr);
+    dl->AddRectFilledMultiColor(ImVec2(p.x + 1, p.y + rr * 0.5f), ImVec2(q.x - 1, q.y - rr * 0.5f), U(top), U(top), U(bottom),
+                                U(bottom));
+    dl->AddRectFilled(p, ImVec2(q.x, p.y + size.y * 0.5f), U(top, 0.35f), rr, ImDrawFlags_RoundCornersTop);
+    dl->AddRect(p, q, U(mix(col, ImVec4(1, 1, 1, 1), 0.55f), enabled ? 0.9f : 0.4f), rr, 0, 1.4f * g_scale);
+    ImFont *f = font ? font : ImGui::GetFont();
+    float fs = font ? font->FontSize : ImGui::GetFontSize();
+    const char *end = strstr(label, "##");  // (an id after ## isn't shown)
+    if (!end) end = label + strlen(label);
+    ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, label, end);
+    ImVec2 tp(p.x + (size.x - ts.x) / 2, p.y + (size.y - ts.y) / 2);
+    dl->AddText(f, fs, ImVec2(tp.x + 1.5f * g_scale, tp.y + 1.5f * g_scale), IM_COL32(0, 0, 0, 140), label, end);
+    dl->AddText(f, fs, tp, enabled ? IM_COL32_WHITE : IM_COL32(200, 196, 220, 160), label, end);
+    return pressed && enabled;
 }
 
 // ================================================================== pages
@@ -1073,11 +1159,10 @@ static void page_play(void) {
     bool ready = g_status.extracted && g_status.built && g_status.nsps_there && !g_running;
     float w = ImGui::GetContentRegionAvail().x;
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + w * 0.2f);
-    ImGui::PushFont(f_big);
     static int autoplay = getenv("MUA3_LAUNCHER_PLAY") ? 5 : -1;  // (test: Play after a few frames)
-    if (red_button("PLAY", ImVec2(w * 0.6f, 74 * g_scale), ready) || (ready && autoplay > 0 && --autoplay == 0))
+    if (gem_button("PLAY", ImVec2(w * 0.6f, 80 * g_scale), k_gem[0], ready, f_title) ||
+        (ready && autoplay > 0 && --autoplay == 0))
         g_play_now = true;
-    ImGui::PopFont();
     ImGui::Spacing();
     hint("Keyboard: WASD move, K / J / L / I are the Switch's A / B / X / Y, Q / E are L / R, 1 / 3 are ZL / ZR, Enter is "
          "Plus (+), Backspace is Minus (-). Controllers work too (buttons by position, as on the Switch). Change them on "
@@ -1129,19 +1214,15 @@ static void page_setup(SDL_Window *win) {
                   (!p_dlc[0] || is_file(p_dlc));
     bool can = !g_running && g_status.msys;
     float bw = (ImGui::GetContentRegionAvail().x - 2 * ImGui::GetStyle().ItemSpacing.x) / 3, bh = 40 * g_scale;
-    if (red_button("INSTALL", ImVec2(bw, bh), can && inputs)) {
+    if (gem_button("INSTALL", ImVec2(bw, bh), k_gem[1], can && inputs, f_head)) {
         paths_to_ini();
         start_steps(true, true, true);
     }
     ImGui::SameLine();
-    ImGui::BeginDisabled(!(can && g_status.extracted));
-    if (ImGui::Button("REBUILD", ImVec2(bw, bh))) start_steps(false, true, true);
-    ImGui::EndDisabled();
+    if (gem_button("REBUILD", ImVec2(bw, bh), k_gem[2], can && g_status.extracted, f_head)) start_steps(false, true, true);
     ImGui::SameLine();
-    ImGui::BeginDisabled(!g_running);
-    if (ImGui::Button("CANCEL", ImVec2(bw, bh))) cancel_steps();
-    ImGui::EndDisabled();
-    hint(g_release ? "INSTALL: read your game files, recompile the game and build it for this PC (about 30 to 60 minutes "
+    if (gem_button("CANCEL", ImVec2(bw, bh), k_gem[0], g_running, f_head)) cancel_steps();
+    hint(g_release ? "INSTALL: read your game files, recompile the game and build it for this PC (about 20 to 40 minutes "
                      "the first time, depending on the CPU). REBUILD: recompile and build again from the files set up."
                    : "INSTALL: read your game files, recompile (make gen) and build (make). REBUILD: recompile and build "
                      "again from the files set up.");
@@ -1276,7 +1357,7 @@ static void page_controls(void) {
     ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
 
     ImGui::BeginGroup();
-    section("KEYBOARD");
+    section("KEYBOARD", half);
     if (ImGui::BeginTable("##keys", 2, tf, ImVec2(half, tall))) {
         ImGui::TableSetupColumn("in", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthStretch, 1.1f);
@@ -1292,7 +1373,7 @@ static void page_controls(void) {
     ImGui::BeginGroup();
     char head[64];
     snprintf(head, sizeof head, "CONTROLLER (%s names)", fam_name[fam]);
-    section(head);
+    section(head, half);
     if (ImGui::BeginTable("##pad", 2, tf, ImVec2(half, tall))) {
         ImGui::TableSetupColumn("in", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableSetupColumn("button", ImGuiTableColumnFlags_WidthStretch, 1.1f);
@@ -1331,6 +1412,8 @@ static void page_about(void) {
     ImGui::TextColored(C_CYAN, "Credits");
     ImGui::BulletText("LAS Recomp by Peiikai and contributors (MIT): the recompiler and the Switch runtime");
     ImGui::BulletText("SDL 3, Dear ImGui, FFmpeg, AMD FidelityFX FSR, SMAA, shaderc");
+    ImGui::BulletText("Recomp Achievements by Ripalda (with rcheevos and cJSON, MIT)");
+    ImGui::BulletText("Baloo 2 font (Ek Type, SIL Open Font License); DejaVu Sans");
     ImGui::BulletText("Switchbrew's documentation");
     ImGui::Spacing();
     ImGui::TextColored(C_CYAN, "Legal");
@@ -1342,36 +1425,46 @@ static void page_about(void) {
     ImGui::TextColored(C_GREY, "Data folder: %s", g_root.c_str());
 }
 
-static void style(void) {
+static void style(void) {  // translucent violet controls over the cosmos; the page's gem colour where it's chosen
     ImGui::StyleColorsDark();
     ImGuiStyle &s = ImGui::GetStyle();
-    s.WindowRounding = 0, s.FrameRounding = 5, s.GrabRounding = 5, s.PopupRounding = 5, s.TabRounding = 5;
-    s.FramePadding = ImVec2(10, 6), s.ItemSpacing = ImVec2(10, 8);
+    s.WindowRounding = 0, s.ChildRounding = 10, s.FrameRounding = 7, s.GrabRounding = 7, s.PopupRounding = 8;
+    s.ScrollbarRounding = 8, s.FramePadding = ImVec2(10, 6), s.ItemSpacing = ImVec2(10, 8), s.WindowBorderSize = 0;
     ImVec4 *c = s.Colors;
-    c[ImGuiCol_WindowBg] = ImVec4(0.07f, 0.08f, 0.11f, 1);
+    c[ImGuiCol_Text] = ImVec4(0.96f, 0.95f, 1.0f, 1);
+    c[ImGuiCol_WindowBg] = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
-    c[ImGuiCol_FrameBg] = ImVec4(0.14f, 0.16f, 0.22f, 1);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.20f, 0.23f, 0.32f, 1);
-    c[ImGuiCol_Button] = ImVec4(0.16f, 0.19f, 0.27f, 1);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.24f, 0.28f, 0.40f, 1);
-    c[ImGuiCol_Header] = ImVec4(0.55f, 0.12f, 0.12f, 0.8f);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.70f, 0.16f, 0.16f, 0.9f);
-    c[ImGuiCol_Tab] = ImVec4(0.14f, 0.16f, 0.22f, 1);
-    c[ImGuiCol_TabHovered] = ImVec4(0.70f, 0.16f, 0.16f, 1);
-    c[ImGuiCol_TabSelected] = ImVec4(0.62f, 0.12f, 0.12f, 1);
-    c[ImGuiCol_TabSelectedOverline] = C_GOLD;
+    c[ImGuiCol_Border] = ImVec4(0.70f, 0.60f, 1.0f, 0.22f);
+    c[ImGuiCol_Separator] = ImVec4(0.70f, 0.60f, 1.0f, 0.22f);
+    c[ImGuiCol_FrameBg] = ImVec4(0.17f, 0.12f, 0.34f, 0.85f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.27f, 0.18f, 0.50f, 0.90f);
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.34f, 0.22f, 0.60f, 0.95f);
+    c[ImGuiCol_Button] = ImVec4(0.22f, 0.15f, 0.42f, 0.90f);
+    c[ImGuiCol_ButtonHovered] = ImVec4(0.38f, 0.24f, 0.66f, 1);
+    c[ImGuiCol_ButtonActive] = ImVec4(0.50f, 0.30f, 0.80f, 1);
+    c[ImGuiCol_Header] = ImVec4(0.42f, 0.24f, 0.74f, 0.75f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(0.52f, 0.30f, 0.86f, 0.85f);
+    c[ImGuiCol_HeaderActive] = ImVec4(0.60f, 0.34f, 0.95f, 0.95f);
     c[ImGuiCol_CheckMark] = C_GOLD;
     c[ImGuiCol_SliderGrab] = C_GOLD;
-    c[ImGuiCol_PopupBg] = ImVec4(0.10f, 0.11f, 0.15f, 1);
-    c[ImGuiCol_TableRowBg] = ImVec4(1, 1, 1, 0.02f);
-    c[ImGuiCol_TableRowBgAlt] = ImVec4(1, 1, 1, 0.05f);
+    c[ImGuiCol_SliderGrabActive] = ImVec4(1, 0.9f, 0.5f, 1);
+    c[ImGuiCol_PopupBg] = ImVec4(0.09f, 0.06f, 0.20f, 0.98f);
+    c[ImGuiCol_TableRowBg] = ImVec4(1, 1, 1, 0.025f);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(1, 1, 1, 0.06f);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0.15f);
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.50f, 0.36f, 0.86f, 0.70f);
+    c[ImGuiCol_TextSelectedBg] = ImVec4(0.64f, 0.32f, 1.0f, 0.45f);
     c[ImGuiCol_NavCursor] = C_GOLD;
 }
 
-static ImFont *load_font(float size) {
+static ImFont *load_font(float size, bool display = false) {  // display: Baloo 2 (SIL OFL, third_party/fonts)
     ImGuiIO &io = ImGui::GetIO();
-    for (const std::string &p : {g_exe_dir + "DejaVuSans.ttf", g_root + "third_party\\fonts\\DejaVu\\DejaVuSans.ttf",
-                                 std::string("C:\\Windows\\Fonts\\segoeui.ttf")})
+    std::vector<std::string> paths;
+    if (display) paths = {g_exe_dir + "Baloo2-SemiBold.ttf", g_root + "third_party\\fonts\\Baloo2\\Baloo2-SemiBold.ttf",
+                          "C:\\Windows\\Fonts\\segoeuib.ttf"};
+    paths.insert(paths.end(), {g_exe_dir + "DejaVuSans.ttf", g_root + "third_party\\fonts\\DejaVu\\DejaVuSans.ttf",
+                               "C:\\Windows\\Fonts\\segoeui.ttf"});
+    for (const std::string &p : paths)
         if (is_file(p))
             if (ImFont *f = io.Fonts->AddFontFromFileTTF(p.c_str(), size)) return f;
     return io.Fonts->AddFontDefault();
@@ -1491,6 +1584,8 @@ int main(int argc, char **argv) {
     f_body = load_font(19 * g_scale);
     f_small = load_font(15 * g_scale);
     f_big = load_font(30 * g_scale);
+    f_head = load_font(31 * g_scale, true);
+    f_title = load_font(54 * g_scale, true);
     style();
     ImGui::GetStyle().ScaleAllSizes(g_scale);
     ImGui_ImplSDL3_InitForSDLRenderer(win, ren);
@@ -1592,38 +1687,90 @@ int main(int argc, char **argv) {
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("##launcher", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
-        // header: the icon and the title
-        float icon = 72 * g_scale;
-        if (art) { ImGui::Image((ImTextureID)(intptr_t)art, ImVec2(icon, icon)); ImGui::SameLine(); }
-        ImGui::BeginGroup();
-        ImGui::Dummy(ImVec2(0, 6 * g_scale));
-        ImGui::PushFont(f_big);
-        ImGui::TextUnformatted("Marvel Ultimate Alliance 3");
-        ImGui::PopFont();
-        hint("PC recompilation - game files, settings, controls and launch");
-        ImGui::EndGroup();
+        if (want_tab >= 0) g_page = want_tab, want_tab = -1;
+        float t = (float)ImGui::GetTime();
+        cosmos(ImGui::GetBackgroundDrawList(), io.DisplaySize, t);
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        // header: the icon, the title in gold, the six gems
+        float icon = 76 * g_scale;
+        ImVec2 h0 = ImGui::GetCursorScreenPos();
+        if (art) {
+            glow(dl, ImVec2(h0.x + icon / 2, h0.y + icon / 2), icon * 0.85f, accent(), 0.45f);
+            ImGui::Image((ImTextureID)(intptr_t)art, ImVec2(icon, icon));
+            ImGui::SameLine();
+        }
+        {
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            const char *title = "MARVEL ULTIMATE ALLIANCE 3";
+            float fs = f_title->FontSize;
+            for (int k = 0; k < 4; k++)  // (a soft dark outline under the gold)
+                dl->AddText(f_title, fs, ImVec2(p.x + (k & 1 ? 2 : -2) * g_scale, p.y + 2 * g_scale + (k & 2 ? 2 : -1) * g_scale),
+                            IM_COL32(20, 6, 40, 200), title);
+            dl->AddText(f_title, fs, p, U(C_GOLD), title);
+            ImVec2 ts = f_title->CalcTextSizeA(fs, FLT_MAX, 0, title);
+            dl->AddRectFilledMultiColor(ImVec2(p.x, p.y + ts.y * 0.52f), ImVec2(p.x + ts.x, p.y + ts.y * 0.86f), 0, 0,
+                                        IM_COL32(255, 140, 40, 70), IM_COL32(255, 140, 40, 70));  // (a warm lower half)
+            dl->AddText(f_body, f_body->FontSize, ImVec2(p.x + 2 * g_scale, p.y + ts.y - 4 * g_scale), U(C_GREY),
+                        "PC recompilation  -  game files, settings, controls and launch");
+            float gx = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - 6 * 26 * g_scale;
+            for (int k = 0; k < 6; k++) {  // (the six gems; the page's one bigger, and bobbing)
+                bool on = k == g_page;
+                float bob = on ? 2.5f * g_scale * sinf(t * 2.2f) : 0;
+                gem(dl, ImVec2(gx + k * 26 * g_scale + 10 * g_scale, h0.y + 26 * g_scale + bob), (on ? 10.5f : 7.5f) * g_scale,
+                    k_gem[k], on ? 0.55f : 0.25f);
+            }
+            ImGui::Dummy(ImVec2(ts.x, icon));
+        }
         ImGui::Spacing();
 
-        float bottom = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y + 6 * g_scale;
-        if (ImGui::BeginTabBar("##tabs")) {
-            for (int i = 0; i < 5; i++) {
-                ImGuiTabItemFlags fl = want_tab == i ? ImGuiTabItemFlags_SetSelected : 0;
-                if (ImGui::BeginTabItem(tabs[i], NULL, fl)) {
-                    ImGui::BeginChild("##page", ImVec2(0, -bottom));
-                    switch (i) {
-                    case 0: page_play(); break;
-                    case 1: page_setup(win); break;
-                    case 2: page_display(); break;
-                    case 3: page_controls(); break;
-                    default: page_about(); break;
-                    }
-                    ImGui::EndChild();
-                    ImGui::EndTabItem();
-                }
+        // tabs: one gem colour each; the shown one filled and glowing (buttons: mouse, keyboard and controller)
+        for (int i = 0; i < 5; i++) {
+            if (i) ImGui::SameLine(0, 8 * g_scale);
+            ImVec2 ts = f_head->CalcTextSizeA(f_head->FontSize, FLT_MAX, 0, tabs[i]);
+            ImVec2 sz(ts.x + 46 * g_scale, ts.y + 12 * g_scale), p = ImGui::GetCursorScreenPos(), q(p.x + sz.x, p.y + sz.y);
+            ImGui::PushID(i);
+            if (ImGui::InvisibleButton("tab", sz)) g_page = i;
+            bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused(), on = g_page == i;
+            ImGui::PopID();
+            ImVec4 col = k_gem[i];
+            if (on) {
+                for (int k = 3; k >= 1; k--)
+                    dl->AddRect(ImVec2(p.x - k * 2.0f, p.y - k * 2.0f), ImVec2(q.x + k * 2.0f, q.y + k * 2.0f), U(col, 0.12f),
+                                10 * g_scale + k * 2, 0, 2.5f * g_scale);
+                dl->AddRectFilledMultiColor(p, q, U(mix(col, ImVec4(1, 1, 1, 1), 0.15f)), U(mix(col, ImVec4(1, 1, 1, 1), 0.15f)),
+                                            U(mix(col, ImVec4(0, 0, 0, 1), 0.35f)), U(mix(col, ImVec4(0, 0, 0, 1), 0.35f)));
+            } else {
+                dl->AddRectFilled(p, q, U(hot ? mix(col, ImVec4(0.1f, 0.06f, 0.2f, 1), 0.55f) : ImVec4(0.10f, 0.07f, 0.22f, 0.80f)),
+                                  10 * g_scale);
             }
-            ImGui::EndTabBar();
+            dl->AddRect(p, q, U(col, on ? 0.95f : 0.55f), 10 * g_scale, 0, 1.4f * g_scale);
+            gem(dl, ImVec2(p.x + 15 * g_scale, p.y + sz.y / 2), 5.5f * g_scale, col, on ? 0.0f : 0.15f);
+            dl->AddText(f_head, f_head->FontSize, ImVec2(p.x + 28 * g_scale, p.y + 6 * g_scale),
+                        on ? IM_COL32_WHITE : U(mix(col, ImVec4(1, 1, 1, 1), 0.55f)), tabs[i]);
         }
-        want_tab = -1;
+        ImGui::Spacing();
+
+        // the page: a translucent card edged in its gem colour
+        float bottom = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y + 10 * g_scale;
+        {
+            ImVec2 a = ImGui::GetCursorScreenPos();
+            ImVec2 b(a.x + ImGui::GetContentRegionAvail().x, ImGui::GetWindowPos().y + ImGui::GetWindowHeight() - bottom);
+            float pad = 16 * g_scale, rr = 14 * g_scale;
+            dl->AddRectFilled(a, b, IM_COL32(12, 8, 30, 205), rr);
+            dl->AddRect(a, b, U(accent(0.55f)), rr, 0, 1.5f * g_scale);
+            dl->AddRectFilledMultiColor(ImVec2(a.x + rr, a.y), ImVec2(b.x - rr, a.y + 3 * g_scale), U(accent(0)), U(accent()),
+                                        U(accent()), U(accent(0)));
+            ImGui::SetCursorScreenPos(ImVec2(a.x + pad, a.y + pad * 0.7f));
+            ImGui::BeginChild("##page", ImVec2(b.x - a.x - 2 * pad, b.y - a.y - pad * 1.2f));
+            switch (g_page) {
+            case 0: page_play(); break;
+            case 1: page_setup(win); break;
+            case 2: page_display(); break;
+            case 3: page_controls(); break;
+            default: page_about(); break;
+            }
+            ImGui::EndChild();
+        }
         // the bottom bar: status line (shortened to fit beside the buttons: the whole of it as a tooltip), Save, Quit
         ImGui::SetCursorPosY(ImGui::GetWindowHeight() - bottom + 4 * g_scale);
         float bw = 130 * g_scale;
@@ -1646,13 +1793,14 @@ int main(int argc, char **argv) {
             status_line(C_GREY, "Settings: " + g_root + "larecomp.ini", true);
         }
         ImGui::SameLine(ImGui::GetWindowWidth() - 2 * bw - ImGui::GetStyle().ItemSpacing.x - ImGui::GetStyle().WindowPadding.x);
-        if (ImGui::Button("Save", ImVec2(bw, 0))) flash(settings_to_ini() ? "Settings saved." : "Couldn't write larecomp.ini.");
+        if (gem_button("Save", ImVec2(bw, ImGui::GetFrameHeight()), accent()))
+            flash(settings_to_ini() ? "Settings saved." : "Couldn't write larecomp.ini.");
         ImGui::SameLine();
         if (ImGui::Button("Quit", ImVec2(bw, 0))) quit = true;
         ImGui::End();
 
         ImGui::Render();
-        SDL_SetRenderDrawColor(ren, 18, 20, 28, 255);
+        SDL_SetRenderDrawColor(ren, 12, 10, 36, 255);
         SDL_RenderClear(ren);
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), ren);
         {   // (test) MUA3_LAUNCHER_SHOT=<file.bmp>: the window's look saved after a few frames, then quit

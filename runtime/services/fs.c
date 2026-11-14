@@ -922,6 +922,10 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
         plat_os_write(b->addr, (uint64_t)size);
         ssize_t n = pread(f->fd, (void *)(uintptr_t)b->addr, (size_t)size, off);
         if (n < 0) resp->result = errno_result();
+        if (n > 0 && off == 0 && !f->scratch) {
+            extern void achievements_file_read(const char *path);  // runtime/achievements.c: a save slot loaded
+            achievements_file_read(f->path);
+        }
         if (n > 0 && !f->scratch && strstr(f->path, "savedata")) {
             LOG("[save] read %s off %lld size %lld -> guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)b->addr);
             extern void save_editor_file_read(const char *path, uint64_t addr, int64_t off, int64_t size);

@@ -224,6 +224,7 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    { extern void achievements_init(void); achievements_init(); }  // (RecompLauncher's; nothing without it)
     for (;;) {  // (no start screen yet: straight into the game, and a reboot boots it again)
         boot(root);
         ui_run();  // window and input on the main thread; returns when a reboot is requested

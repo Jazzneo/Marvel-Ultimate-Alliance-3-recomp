@@ -264,9 +264,9 @@ extern "C" void controls_tab_draw(float scale) {
         input_apply_background();
 
     opt_section("Movement");
-    opt_toggle("D-pad moves Link", &g_settings.dpad_move, false, "The d-pad moves Link like the control stick.");
-    opt_toggle("360-degree movement", &g_settings.move_360, false,
-               "Link walks in the exact direction of the stick instead of snapping to 8 directions.");
+    opt_toggle("D-pad moves your hero", &g_settings.dpad_move, false,
+               "The d-pad moves your hero like the control stick (when the stick is at rest).");
+    // (LAS Recomp's "360-degree movement" was a Link's Awakening patch: MUA3 moves in any direction already)
 
     opt_section("Controller");
     opt_toggle("Rumble", &g_settings.rumble, true, "Controller vibration.");
@@ -279,14 +279,14 @@ extern "C" void controls_tab_draw(float scale) {
             g_settings.rumble_strength = (i + 1) * 25;
         opt_indent(-1);
     }
-    opt_toggle("Controller light", &g_settings.controller_light, true, "The light bar shows Link's health.");
+    // (LAS Recomp's "Controller light" showed Link's health on the light bar: MUA3 has no health source for it yet)
     {
         static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
         char autol[64];
         snprintf(autol, sizeof autol, "Auto (%s)", fam[input_pad_family() % 3]);
         const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
         opt_choice("Button icons", &g_settings.prompts, names, 4, PROMPTS_AUTO,
-                   "The button icons the game shows. Auto: the connected controller's.");
+                   "Whose button names MUA3 Recomp's menus show. Auto: the connected controller's.");
     }
     {
         static const char *const names[] = {"Game layout", "Controller convention"};

@@ -132,12 +132,23 @@ void settings_resolve_defaults(bool integrated) {
         g_settings.antialias == AA_SMAA ? "smaa" : "off");
 }
 
+// RecompLauncher's Big Picture mode (RECOMPLAUNCHER_MODE=bigpicture: a controller, a couch): full screen for this
+// session. larecomp.ini keeps the player's own choice - settings_save writes it while the session's is in effect.
+static int g_fullscreen_saved = -1;  // (the file's value, while Big Picture overrides it)
+static void launcher_mode(void) {
+    const char *m = getenv("RECOMPLAUNCHER_MODE");
+    if (!m || strcmp(m, "bigpicture") || g_settings.fullscreen) return;
+    g_fullscreen_saved = 0;
+    g_settings.fullscreen = true;
+    LOG("[settings] RecompLauncher Big Picture: full screen for this session\n");
+}
+
 void settings_load(void) {
     static bool loaded;
     if (loaded) return;
     loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
-    if (!f) return;
+    if (!f) { launcher_mode(); return; }
     char line[256];
     bool tip_key = false, aspect_key = false;
     while (fgets(line, sizeof line, f)) {
@@ -242,6 +253,7 @@ void settings_load(void) {
     if (g_settings.volume > 2) g_settings.volume = 2;
     if (g_settings.rumble_strength < 25 || g_settings.rumble_strength > 100) g_settings.rumble_strength = 100;
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
+    launcher_mode();
 }
 
 void settings_save(void) {
@@ -249,7 +261,8 @@ void settings_save(void) {
     if (!f) { LOG("[settings] cannot write %s\n", SETTINGS_FILE); return; }
     fprintf(f, "# MUA3 Recomp settings (the launcher, and the in-game menu: F1, Esc, or Minus+Plus on a controller)\n");
     fprintf(f, "aspect = %s\n", g_settings.aspect == ASPECT_ORIGINAL ? "original" : "unlocked");
-    fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
+    fprintf(f, "fullscreen = %d\n",
+            g_fullscreen_saved >= 0 && g_settings.fullscreen ? g_fullscreen_saved : g_settings.fullscreen);
     fprintf(f, "exclusive_fullscreen = %d\n", g_settings.exclusive_fullscreen);
     fprintf(f, "window_width = %d\nwindow_height = %d\n", g_settings.window_width, g_settings.window_height);
     fprintf(f, "volume = %.2f\n", g_settings.volume);

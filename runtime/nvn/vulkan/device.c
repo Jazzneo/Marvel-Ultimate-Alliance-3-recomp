@@ -1159,6 +1159,8 @@ static void present_hooks(void) {
     fnprof_frame(total_frames);
     extern void reboot_test_frame(uint64_t frame);  // runtime/main.c (LARECOMP_REBOOT_AT)
     reboot_test_frame(total_frames);
+    extern void achievements_frame(void);  // runtime/achievements.c (RecompLauncher's channel)
+    achievements_frame();
     extern void save_editor_frame(uint64_t frame);
     save_editor_frame(total_frames);
     extern void vk_level_change_check(void);

@@ -355,12 +355,17 @@ static void note_family(void) {
     pad_family = f;
 }
 int input_pad_family(void) {
-    static int env = -2;
+    static int env = -2, launcher = -2;
     if (env == -2) {
         const char *e = getenv("LARECOMP_PAD_TYPE");
         env = !e ? -1 : !strcmp(e, "xbox") ? 1 : !strcmp(e, "playstation") || !strcmp(e, "ps") ? 2 : 0;
+        // RecompLauncher names the controller it saw (RECOMPLAUNCHER_PAD=xbox|playstation): its button names from
+        // the first frame, until the game has a controller of its own to go by
+        e = getenv("RECOMPLAUNCHER_PAD");
+        launcher = !e ? -1 : !strcmp(e, "xbox") ? 1 : !strcmp(e, "playstation") ? 2 : -1;
     }
-    return env >= 0 ? env : pad_family;
+    if (env >= 0) return env;
+    return !pad && launcher >= 0 ? launcher : pad_family;
 }
 
 // Our menus' face buttons: the family whose button names they show, and (Confirm button = Controller convention, #172)
