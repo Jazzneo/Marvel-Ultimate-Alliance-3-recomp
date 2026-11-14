@@ -18,6 +18,10 @@ int cheats_link_health(int *max) { if (max) *max = 0; return -1; }
 // target rate at [frame object + 0x98] (30.0); the frame object is a global, its logic frame count at +0x68
 #define FRAME_OBJ 0x70045a7158ull
 bool game_frame_limiter_sleep(uint64_t lr) { return lr == 0x70008395b4ull; }  // (its SleepThread: LARECOMP_LOG_LIMITER)
+uint64_t game_frame_period_ns(void) {  // 1 / its target rate (0: not a rate we know)
+    float t = *(volatile float *)(uintptr_t)(FRAME_OBJ + 0x98);
+    return t >= 20.0f && t <= 240.0f ? (uint64_t)(1e9 / t) : 0;
+}
 
 // The game's time step (f_7000839000): dt = max(measured frame time, its frame interval's step), at most 1/30 s, where
 // the step comes from a table (0x70019f33d8): 1/60 s for frame interval 1, 1/30 s for 2 ([[0x7002188a00] + 0x60];

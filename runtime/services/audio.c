@@ -632,6 +632,38 @@ static int mix_targets(Renderer *r, const Mix *s, int32_t *ids, int max) {
     return n;
 }
 
+// Does mix m reach the final mix (its destination, or its splitter's destinations in use, and on from there)?
+static bool reaches_out(Renderer *r, int32_t m, int depth) {
+    if (m == 0) return find_mix(r, 0) != NULL;
+    const Mix *s = find_mix(r, m);
+    if (!s || !s->used || depth > 16) return false;
+    int32_t ids[SPLIT_DEST_MAX];
+    int n = mix_targets(r, s, ids, SPLIT_DEST_MAX);
+    for (int k = 0; k < n; k++)
+        if (ids[k] != m && reaches_out(r, ids[k], depth + 1)) return true;
+    return false;
+}
+// A voice that produced sound into a route reaching no output is logged (a few times each): sound the game plays and
+// nobody hears - as MUA3's dialogue was while the splitter destinations weren't read.
+static void check_voice_route(Renderer *r, uint32_t vi, const Voice *v) {
+    bool out = false;
+    if (v->splitter_id != 0xFFFFFFFFu) {
+        const SplitInfo *si = v->splitter_id < r->splitters ? &r->sinfo[v->splitter_id] : NULL;
+        for (uint32_t k = 0; si && k < si->ndest && !out; k++) {
+            const SplitDest *d = si->dest[k] >= 0 && (uint32_t)si->dest[k] < r->splitter_dests ? &r->sdest[si->dest[k]] : NULL;
+            out = d && d->in_use && reaches_out(r, d->mix_id, 0);
+        }
+    } else {
+        out = reaches_out(r, v->mix_id, 0);
+    }
+    static uint8_t logged[256];
+    if (out || vi >= 256 || logged[vi] >= 3) return;
+    logged[vi]++;
+    LOG("[audren] lost audio: voice %u (fmt %u, %u Hz, %u ch) plays into %s %d, which reaches no output\n", vi, v->fmt,
+        v->rate, v->chans, v->splitter_id != 0xFFFFFFFFu ? "splitter" : "mix",
+        v->splitter_id != 0xFFFFFFFFu ? (int)v->splitter_id : (int)v->mix_id);
+}
+
 static void render_frame(Renderer *r, float *stereo) {
     if (hf_log < 0) hf_log = getenv("LARECOMP_AUDIO_HF") ? 1 : 0;
     uint32_t N = r->sample_count;
@@ -657,6 +689,11 @@ static void render_frame(Renderer *r, float *stereo) {
             memcpy(tmp, cs->hist, sizeof cs->hist);
             int got = decode_voice(v, c, cs, tmp + HIST, need);
             if (got < need) memset(tmp + HIST + got, 0, (need - got) * 2);
+            if (c == 0 && got > 0 && v->volume > 0) {  // (sound, not silence, going somewhere that's heard?)
+                int loud = 0;
+                for (int i = 0; i < got && !loud; i++) loud = tmp[HIST + i] > 256 || tmp[HIST + i] < -256;
+                if (loud) check_voice_route(r, vi, v);
+            }
             float pos = cs->fraction;
             for (uint32_t i = 0; i < N; i++, pos += ratio) {
                 int k = (int)pos;
@@ -868,7 +905,9 @@ static void *renderer_tick(void *arg) {
             if (next > t) { struct timespec ts = {0, (long)(next - t)}; nanosleep(&ts, NULL); }
             next += (uint64_t)N * 1000000000ull / r->sample_rate;
         }
+        uint64_t t_lock = plat_now_ns();
         pthread_mutex_lock(&r->lock);
+        uint64_t t_render = plat_now_ns();
         if (r->state == 0) {
             render_frame(r, out);
             r->elapsed_frames++;
@@ -876,7 +915,25 @@ static void *renderer_tick(void *arg) {
             memset(out, 0, frame_bytes);
         }
         pthread_mutex_unlock(&r->lock);
-        if (r->stream) { apply_gain(r->stream); SDL_PutAudioStreamData(r->stream, out, frame_bytes); }
+        if (r->stream) {
+            // the device ran dry since the last block (it played silence: a dropout), counted and logged every 10 s;
+            // the first few with where the time went (waiting for the lock the game's updates hold, rendering, or the
+            // thread itself late)
+            static uint64_t dry, dry_logged, last_log, last_put;
+            uint64_t t_done = plat_now_ns();
+            if (r->elapsed_frames > 400 && SDL_GetAudioStreamQueued(r->stream) == 0) {
+                if (dry++ < 10)
+                    LOG("[audren] output ran dry: %.1f ms since the last block (lock wait %.1f ms, render %.1f ms)\n",
+                        last_put ? (t_done - last_put) / 1e6 : 0.0, (t_render - t_lock) / 1e6, (t_done - t_render) / 1e6);
+            }
+            last_put = t_done;
+            if (dry != dry_logged && r->elapsed_frames - last_log >= 2000) {
+                LOG("[audren] output ran dry %llu times (the renderer thread was late: dropouts)\n", (unsigned long long)dry);
+                dry_logged = dry, last_log = r->elapsed_frames;
+            }
+            apply_gain(r->stream);
+            SDL_PutAudioStreamData(r->stream, out, frame_bytes);
+        }
         if (r->wav && r->state == 0) {
             fwrite(out, 1, frame_bytes, r->wav);
             r->wav_bytes += frame_bytes;

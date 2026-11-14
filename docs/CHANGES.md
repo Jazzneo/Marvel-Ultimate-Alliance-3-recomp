@@ -463,6 +463,25 @@ Expansion Pass.
   At a third of the resolution it's still ~87 fps, so dynamic resolution (which also aims at 60: `DYN_BUDGET`) can't
   reach 120 either. On a 60 Hz display (this PC's) frames above 60 aren't shown anyway; the launcher says so.
 
+## Game time exactly real time; audio dropouts watched (2026-11-13)
+
+- **Found:** with the precise sleep the limiter still drifted: each frame waits until its own start + 1 / rate, so the
+  time the frame's work takes past that is never caught up and game time ran ~1-2 % slow (and an odd late frame a
+  little fast after).
+- **Changed** (`runtime/kernel.c`, `game_frame_period_ns` in `runtime/hle/game_hooks.c`): the limiter's wakeups are
+  held to a grid of 1 / the game's target rate - a wakeup within a quarter period of the next grid point lands on it,
+  anything further off (a load, a long frame) starts a new grid. Now `LARECOMP_LOG_GAMETIME` shows 4.00 s of game
+  time in 4.00 s at 30, 60 and 120, the title at exactly 30.0 / 60.0 / 120.0 fps, and the dialogue lines take the
+  same time at every rate (no speed-up, no slow-down).
+- **Added** (`runtime/services/audio.c`): `[audren] lost audio: voice ...` when a voice decodes sound at a volume
+  above zero but its route (sub mixes, splitters) never reaches the final mix - the way the dialogue was silent - and
+  `[audren] output ran dry` when the device runs out of queued audio (a dropout), with where the renderer thread's
+  time went (waiting for the lock, rendering, or itself late).
+- **Checked** (RTX 3060, i7-11700F): the first level from its start to "Follow the Scanner" (5.5 minutes, moving,
+  attacking, the dialogue) at 30, 60 and 120: no crash, no lost audio; one dropout in one 30 fps run, during the
+  level's first dialogue lines loading, not repeated in the next runs. At 120 the logic runs 120 frames a second with
+  ~91 presented in the level.
+
 ## Status (MUA3, 2026-11-01)
 
 - **Runs at 29-30 fps at 1920x1080** (i9-10900, RTX 3080 Ti) from the title through save creation, the opening movie
