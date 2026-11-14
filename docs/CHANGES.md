@@ -481,6 +481,9 @@ Expansion Pass.
   attacking, the dialogue) at 30, 60 and 120: no crash, no lost audio; one dropout in one 30 fps run, during the
   level's first dialogue lines loading, not repeated in the next runs. At 120 the logic runs 120 frames a second with
   ~91 presented in the level.
+- **The audio thread at time-critical priority** (`plat_thread_realtime`, as the vsync thread): playing the release
+  from a fresh install, one dropout in two runs while the first shader builds ran - the thread wasn't run for ~50 ms,
+  with no wait on a lock and 0.2 ms of rendering (the dropout line now shows the kernel lock and queue wait too).
 - **`make dist`'s check for this machine's paths:** make's shell has no `USERPROFILE` / `USERNAME`, so the profile
   pattern had been just `C:/Users/` (it matched text in Python's DLL). The user name now comes from `HOME` when
   needed, the check stops if it has none, and the MSYS2 home folder is checked too.

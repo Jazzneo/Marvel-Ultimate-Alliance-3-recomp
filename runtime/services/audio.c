@@ -876,6 +876,9 @@ static void wav_header(FILE *f, uint32_t bytes) {
 
 static void *renderer_tick(void *arg) {
     Renderer *r = arg;
+    // it sleeps nearly all the time, but when the device needs the next block it can't wait: at normal priority, with
+    // every core busy (the game's threads and a burst of shader builds) it once wasn't run for ~50 ms, a dropout
+    plat_thread_realtime((uint64_t)r->sample_count * 1000000000ull / (r->sample_rate ? r->sample_rate : 48000));
     float out[2 * 4096];
     uint32_t N = r->sample_count > 4096 ? 4096 : r->sample_count;
     int frame_bytes = (int)(N * 2 * sizeof(float));
@@ -892,7 +895,9 @@ static void *renderer_tick(void *arg) {
                 target / (2 * (int)sizeof(float)));
         }
     }
+    uint64_t klock_ns = 0;  // (the last block's wait for the kernel lock to signal the game: the dropout log)
     while (!r->quit) {
+        uint64_t t_wait = plat_now_ns();
         if (r->stream) {
             while (SDL_GetAudioStreamQueued(r->stream) >= target && !r->quit) {
                 struct timespec ts = {0, 1000000};
@@ -923,8 +928,9 @@ static void *renderer_tick(void *arg) {
             uint64_t t_done = plat_now_ns();
             if (r->elapsed_frames > 400 && SDL_GetAudioStreamQueued(r->stream) == 0) {
                 if (dry++ < 10)
-                    LOG("[audren] output ran dry: %.1f ms since the last block (lock wait %.1f ms, render %.1f ms)\n",
-                        last_put ? (t_done - last_put) / 1e6 : 0.0, (t_render - t_lock) / 1e6, (t_done - t_render) / 1e6);
+                    LOG("[audren] output ran dry: %.1f ms since the last block (kernel lock %.1f ms, queue wait %.1f ms, "
+                        "lock wait %.1f ms, render %.1f ms)\n", last_put ? (t_done - last_put) / 1e6 : 0.0,
+                        klock_ns / 1e6, (t_lock - t_wait) / 1e6, (t_render - t_lock) / 1e6, (t_done - t_render) / 1e6);
             }
             last_put = t_done;
             if (dry != dry_logged && r->elapsed_frames - last_log >= 2000) {
@@ -939,7 +945,9 @@ static void *renderer_tick(void *arg) {
             r->wav_bytes += frame_bytes;
             if ((r->elapsed_frames & 255) == 0) { wav_header(r->wav, r->wav_bytes); fflush(r->wav); }
         }
+        uint64_t t_k = plat_now_ns();
         pthread_mutex_lock(&g_klock);
+        klock_ns = plat_now_ns() - t_k;
         kernel_signal(r->event);
         pthread_mutex_unlock(&g_klock);
     }
