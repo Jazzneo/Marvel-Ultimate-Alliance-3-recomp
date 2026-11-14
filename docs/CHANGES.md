@@ -481,6 +481,9 @@ Expansion Pass.
   attacking, the dialogue) at 30, 60 and 120: no crash, no lost audio; one dropout in one 30 fps run, during the
   level's first dialogue lines loading, not repeated in the next runs. At 120 the logic runs 120 frames a second with
   ~91 presented in the level.
+- **`make dist`'s check for this machine's paths:** make's shell has no `USERPROFILE` / `USERNAME`, so the profile
+  pattern had been just `C:/Users/` (it matched text in Python's DLL). The user name now comes from `HOME` when
+  needed, the check stops if it has none, and the MSYS2 home folder is checked too.
 
 ## Status (MUA3, 2026-11-01)
 

@@ -230,9 +230,11 @@ dist:
 	! find "$(DIST)" \( -name extracted -o -name 'generated*' -o -name exefs -o -name romfs -o -name 'mua3game*' \
 	    -o -name '*.nso' -o -name '*.nca' -o -name '*.nsp' -o -name '*.xci' -o -name '*.keys' -o -name 'romfs.src' \
 	    -o -name 'launcher.ini' -o -name 'larecomp.ini' \) | grep .
-	h="$${USERPROFILE:-C:\\Users\\$${USERNAME:-$$USER}}"; \
+	u="$${USERNAME:-$$(basename "$$HOME")}"; [ -n "$$u" ] || { echo "no user name for the path check"; exit 1; }; \
+	    h="$${USERPROFILE:-C:\\Users\\$$u}"; \
 	    ! grep -rlaiF -e "$(CURDIR)" -e "$$(cygpath -m '$(CURDIR)')" -e "$$(cygpath -w '$(CURDIR)')" \
-	    -e "$$(cygpath -w "$$h")" -e "$$(cygpath -m "$$h")" "$(DIST)"
+	    -e "$$(cygpath -w "$$h")" -e "$$(cygpath -m "$$h")" -e "$$(cygpath -w "$$HOME")" -e "$$(cygpath -m "$$HOME")" \
+	    "$(DIST)"
 	cd build/dist && rm -f "$(DIST_ZIP)" && zip -qr9 "$(DIST_ZIP)" "MUA3 Recomp"
 	@du -sh "build/dist/$(DIST_ZIP)"
 
