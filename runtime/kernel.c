@@ -719,6 +719,14 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
                              (x[19] >> 32 == 0x72 || x[19] >> 32 == 0x70) ? (unsigned long long)*(uint64_t *)(uintptr_t)(x[19] + 0x68) : 0ull);
         }
         if (ns <= 0) { sched_yield(); break; }
+        // The game's frame limiter (sleeps until its frame start + 1 / its rate): waited out precisely. nanosleep rounds
+        // up to the system timer (~1 ms on Windows), and every frame paid it: 108 fps at 120, 57 at 60, 29.3 at 30.
+        if (ns < 50000000 && game_frame_limiter_sleep(c->x[30])) {
+            uint64_t now = plat_now_ns();
+            plat_sleep_until_ns(now + (uint64_t)ns);
+            g_blocked_ns += plat_now_ns() - now;
+            break;
+        }
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;
             struct timespec ts = {(time_t)(d / 1000000000), (long)(d % 1000000000)};

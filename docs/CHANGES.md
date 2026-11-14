@@ -446,6 +446,23 @@ Expansion Pass.
   the background, the title at 29 fps; the player's own settings and cache: preparation 690 ms, 57 fps at 60;
   `route.sh kree` into the first level, no crash.
 
+## 120 fps checked; every frame rate at its target (2026-11-13)
+
+- **Checked at 120** (RTX 3060, i7-11700F): boot and title (`frame_rate = 120`: the display at 240 Hz), the opening
+  movie (video 29.97 fps and audio at their own rates: the decoders' frames 76 a second, as 29.97 + 46.9), the first
+  level with its dialogue voiced (`LARECOMP_FPS_AT=3550:240`: note the display rate is twice the frame rate) - no
+  crash, game time at real time (`LARECOMP_LOG_GAMETIME`).
+- **Found:** every setting ran a little under its rate - 108 at 120, 57 at 60, 29.3 at 30: the game's frame limiter
+  sleeps until its frame start + 1 / rate, and SleepThread's nanosleep rounds up to the system timer, ~0.9 ms a frame.
+- **Changed** (`runtime/kernel.c`): the limiter's sleep (its call site, `game_frame_limiter_sleep`) waits on
+  `plat_sleep_until_ns` (a high-resolution timer, the last 0.2 ms spun); other sleeps are as before. Now the title at
+  ~117 at 120, 59.3 at 60, 29.8 at 30; the first level 117 logic frames a second at 120, 59 fps at 60, 29.8 at 30.
+- **Not changed - the first level at 120 shows ~72 fps here:** the GPU's work is ~8.8 ms a frame (`LARECOMP_GPUPROF_AT`;
+  the tiled light culling and the lighting passes ~1.0-1.3 ms each), and frames come every ~14 ms with the render thread
+  waiting on the GPU half the time: the game reads compute results back each frame, so CPU and GPU work don't overlap.
+  At a third of the resolution it's still ~87 fps, so dynamic resolution (which also aims at 60: `DYN_BUDGET`) can't
+  reach 120 either. On a 60 Hz display (this PC's) frames above 60 aren't shown anyway; the launcher says so.
+
 ## Status (MUA3, 2026-11-01)
 
 - **Runs at 29-30 fps at 1920x1080** (i9-10900, RTX 3080 Ti) from the title through save creation, the opening movie
