@@ -273,6 +273,16 @@ uint64_t plat_thread_cpu_ns(void) {
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x2
 #endif
 
+// A short sleep on the high-resolution timer, no spinning (a thread polling with them doesn't burn a core): ~0.5 ms
+// at the least, where Sleep / nanosleep took 1-2.5 ms even with timeBeginPeriod(1).
+void plat_sleep_short_ns(uint64_t ns) {
+    static __thread HANDLE timer;
+    if (!timer) timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    LARGE_INTEGER due = {.QuadPart = -(LONGLONG)(ns / 100 ? ns / 100 : 1)};
+    if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, INFINITE);
+    else Sleep(ns >= 1000000 ? (DWORD)(ns / 1000000) : 1);
+}
+
 void plat_sleep_until_ns(uint64_t t) {
     static __thread HANDLE timer;
     if (!timer) {

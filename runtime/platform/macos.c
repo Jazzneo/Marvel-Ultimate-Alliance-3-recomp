@@ -120,6 +120,7 @@ void plat_sleep_until_ns(uint64_t t) {
 }
 bool plat_display_vblank(uint64_t *last_ns, uint64_t *period_ns) { (void)last_ns, (void)period_ns; return false; }
 void plat_display_window(void *native) { (void)native; }
+void plat_sleep_short_ns(uint64_t ns) { struct timespec ts = {0, (long)ns}; nanosleep(&ts, NULL); }
 void plat_thread_background(bool on) { (void)on; }  // (not done on macOS yet)
 
 // Real-time (time-constraint) thread: exempt from the timer coalescing macOS applies to

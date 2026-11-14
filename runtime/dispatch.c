@@ -99,17 +99,23 @@ uint64_t guest_sym(const char *name) {
 }
 
 static uint64_t hle_next = HLE_HEAP;
+static uint64_t hle_used_hi = HLE_HEAP;  // (the end of what was ever handed out: above it, memory never written)
 RT_ON_RESET(hle_heap_reset) { hle_next = HLE_HEAP; }  // (guest memory, wiped by the reboot)
 
+// Zeroed memory. Only what was handed out before (a reboot starts the heap over) is cleared here: memory committed now
+// is zero already, and clearing it touched every page on the calling thread - the movie decoder's 34 MB of buffers,
+// 10 ms of the game's main thread as the opening movie starts (a dropped frame); the pages are faulted in as they're
+// first written instead, by the thread that writes them.
 void *hle_alloc(uint64_t size) {
     static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
     pthread_mutex_lock(&m);
-    uint64_t a = hle_next;
+    uint64_t a = hle_next, used = hle_used_hi;
     hle_next += (size + 63) & ~63ull;
     if (hle_next > HLE_HEAP + HLE_HEAP_SIZE) FATAL("HLE heap exhausted\n");
+    if (hle_next > hle_used_hi) hle_used_hi = hle_next;
     pthread_mutex_unlock(&m);
     plat_commit(a, size);
-    memset((void *)a, 0, size);
+    if (a < used) memset((void *)a, 0, (a + size < used ? a + size : used) - a);
     return (void *)a;
 }
 

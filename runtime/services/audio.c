@@ -896,6 +896,8 @@ static void *renderer_tick(void *arg) {
         }
     }
     uint64_t klock_ns = 0;  // (the last block's wait for the kernel lock to signal the game: the dropout log)
+    int signal_late = 0, late_max = (int)(20000000ull * r->sample_rate / 1000000000ull / (N ? N : 1));  // (~20 ms of blocks)
+    if (late_max < 2) late_max = 2;
     while (!r->quit) {
         uint64_t t_wait = plat_now_ns();
         if (r->stream) {
@@ -945,11 +947,23 @@ static void *renderer_tick(void *arg) {
             r->wav_bytes += frame_bytes;
             if ((r->elapsed_frames & 255) == 0) { wav_header(r->wav, r->wav_bytes); fflush(r->wav); }
         }
+        // The game's event for its next update, signalled under the kernel lock - but never waited for here: a game
+        // thread holding it can be descheduled while loading keeps every core busy, and this thread once waited
+        // 44 ms for it (a dropout). Busy: the signal goes with the next block instead (the event stays set: the game
+        // misses no update, it only gets it a block later), and the output keeps flowing; after ~20 ms of that, it
+        // waits as before.
         uint64_t t_k = plat_now_ns();
-        pthread_mutex_lock(&g_klock);
+        bool locked = pthread_mutex_trylock(&g_klock) == 0;
+        if (!locked && ++signal_late >= late_max) {
+            pthread_mutex_lock(&g_klock);
+            locked = true;
+        }
         klock_ns = plat_now_ns() - t_k;
-        kernel_signal(r->event);
-        pthread_mutex_unlock(&g_klock);
+        if (locked) {
+            kernel_signal(r->event);
+            pthread_mutex_unlock(&g_klock);
+            signal_late = 0;
+        }
     }
     return NULL;
 }

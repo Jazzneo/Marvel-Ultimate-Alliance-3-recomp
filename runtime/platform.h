@@ -45,6 +45,7 @@ int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
 
 // ---- time
 uint64_t plat_now_ns(void);                // monotonic
+void plat_sleep_short_ns(uint64_t ns);   // a short sleep, as close to ns as the OS allows, without spinning
 void plat_sleep_until_ns(uint64_t t);      // precise wait for plat_now_ns() >= t
 // the display's latest vblank (plat_now_ns() time) and refresh period; false: not known (only Windows so far)
 bool plat_display_vblank(uint64_t *last_ns, uint64_t *period_ns);

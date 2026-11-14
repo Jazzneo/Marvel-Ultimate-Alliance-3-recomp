@@ -745,6 +745,14 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
             g_blocked_ns += plat_now_ns() - now;
             break;
         }
+        // Short sleeps (the game polls with 100 us ones - eight in a row while the opening movie streams the level):
+        // the OS's high-resolution timer, ~0.5 ms each; nanosleep took 1-2.5 ms for every one of them.
+        if (ns < 2000000) {
+            uint64_t now = plat_now_ns();
+            plat_sleep_short_ns((uint64_t)ns);
+            g_blocked_ns += plat_now_ns() - now;
+            break;
+        }
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;
             struct timespec ts = {(time_t)(d / 1000000000), (long)(d % 1000000000)};

@@ -557,8 +557,28 @@ Expansion Pass.
   level look as before. Splitting a texture's hash and copy over helper threads gained nothing here (the copy waits
   on memory, not the CPU) and isn't kept. The hash, about a third of what's left, would go with a single pass that
   hashes while it copies.
-- **Not textures:** the few late frames left at the opening movie's end are the game's own threads waiting on each
-  other while its movie player shuts down (the presenting thread waits 60-80 ms with its own CPU idle, now and then).
+
+## The opening movie's starts and stops (2026-11-14)
+
+- **Found** (each game thread's waits, sleeps and signals around the late frames, with timestamps): the presenting
+  thread waits up to a frame for the game's main thread to hand it the next one, and the late frames were the main
+  thread's long ones - at the movie's start, in the middle (the level streamed in), at its end and as the level
+  begins.
+- **The movie's start** (`runtime/dispatch.c` `hle_alloc`): opening the decoder took the main thread 13 ms, nearly all
+  of it clearing 34 MB of new buffers that were zero already (committed memory is) - every page faulted in on that
+  thread. Only memory handed out before (a reboot starts the native heap over) is cleared now; the decoder's buffers
+  are faulted in by the thread that fills them. Opening the movie's file (5.6 ms) remains, within the frame.
+- **Short sleeps** (`runtime/kernel.c` SleepThread, `plat_sleep_short_ns`): the game polls with 100 us sleeps - eight
+  in a row while the level streams in during the movie - and each took 1-2.5 ms (Windows' timer, even at 1 ms
+  resolution). Under 2 ms they now wait on the high-resolution timer, ~0.5 ms, without spinning a core.
+- **The audio thread and the kernel lock** (`runtime/services/audio.c`): once in ~20 runs the sound dropped out for a
+  moment as the game loaded its heroes after the title - the audio thread had waited 44 ms for the kernel lock, to
+  signal the game's audio event (no code path held it that long: a game thread holding it, descheduled while every
+  core was loading). The signal now waits for a free lock only after ~20 ms of trying; until then it goes with the
+  next block (the event stays set, the game misses no update) and the output keeps flowing.
+- **Checked:** in seven runs of the opening movie, its 10 s window showed 2-6 frames off the cadence (one to three
+  late frames, at the level's own loading as the movie ends), where it had shown up to 24. The full route at 30 and
+  60 fps: 10 and 12 frames off the cadence in 5.5 minutes (25 and 22 the round before), game time 4.00 s in 4.00 s.
 
 ## Status (MUA3, 2026-11-01)
 
