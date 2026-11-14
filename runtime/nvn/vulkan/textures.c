@@ -608,7 +608,8 @@ static void upload_pending(TexBackend *b) {
     if (nv12) { vk_convert_nv12(b, px, w, h, stride, uv_off); free(px); return; }
     if (w > b->width) w = b->width;
     if (h > b->height) h = b->height;
-    VkSpan s = vk_transient_copy(px, (uint64_t)stride * h, 16);
+    VkSpan s = vk_transient_upload((uint64_t)stride * h, 16);
+    memcpy(s.ptr, px, (uint64_t)stride * h);
     free(px);
     VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = stride / 4,
                             .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
@@ -646,7 +647,8 @@ static void upload_buffer_texture(NvnTexture *t, TexBackend *b) {
     b->data_hash = h;
     b->uploaded = true;
     if (b->format != fmt_of(t->format).vf || fi->bpb == 3) return;  // (no RGB expansion here: not seen)
-    VkSpan s = vk_transient_copy(mem, total, 16);
+    VkSpan s = vk_transient_upload(total, 16);
+    memcpy(s.ptr, mem, total);
     VkBufferImageCopy rg = {.bufferOffset = s.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, 1, 1}};
     rec_CmdCopyBufferToImage(vk_upload_cmd(), s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
 }
@@ -742,7 +744,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * 16, src + (uint64_t)y * t->stride, l.wb * 16);
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
                 if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, blocks, l.w, l.h, l.wb * 16);
-                VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
+                VkSpan s = vk_transient_upload((uint64_t)l.w * l.h * 4, 16);
                 astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
                 free(blocks);
                 VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = l.w, .bufferImageHeight = l.h,
@@ -777,7 +779,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 }
             }
             uint32_t out_row = expand ? l.wb * 4 : row;
-            VkSpan s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
+            VkSpan s = vk_transient_upload((uint64_t)out_row * l.hb * l.d, 16);
             uint8_t *lin = expand ? malloc(sz) : s.ptr;
             const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
             if (linear) {
@@ -811,15 +813,23 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     }
 }
 
+
+uint64_t g_tex_cpu_ns;  // (the render thread) time in texture updates and movie frames so far (present_timing.c's log)
 TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     TexBackend *b = tex_backend(t);
-    if (b->pending_rgba) upload_pending(b);
+    if (b->pending_rgba) {
+        uint64_t t0 = plat_now_ns();
+        upload_pending(b);
+        g_tex_cpu_ns += plat_now_ns() - t0;
+    }
     if (for_render) b->gpu_owned = true;
     else if (!b->gpu_owned) {
         extern uint64_t prof_up_ns;
-        uint64_t t0 = prof_up_ns != ~0ull ? SDL_GetTicksNS() : 0;
+        uint64_t t0 = plat_now_ns();
         upload_texture(t, b);
-        if (prof_up_ns != ~0ull) prof_up_ns += SDL_GetTicksNS() - t0;
+        uint64_t dt = plat_now_ns() - t0;
+        g_tex_cpu_ns += dt;
+        if (prof_up_ns != ~0ull) prof_up_ns += dt;
     }
     return b;
 }

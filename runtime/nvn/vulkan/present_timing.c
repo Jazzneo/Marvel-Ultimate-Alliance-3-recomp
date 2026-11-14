@@ -77,14 +77,16 @@ static void stats(uint64_t t, uint64_t id, uint64_t id_before) {
         if (d > max) max = d;
         if (verbose) {
             extern void slow_totals(uint64_t *uploads, uint64_t *bytes, uint64_t *pipes);  // (slowframe.c)
-            static uint64_t lu, lb, lp;
-            uint64_t u, by, pp;
+            extern uint64_t g_tex_cpu_ns, rq_render_cpu_ns(void);  // (textures.c, rqueue.c)
+            static uint64_t lu, lb, lp, lt, lr;
+            uint64_t u, by, pp, tc = g_tex_cpu_ns, rc = rq_render_cpu_ns();
             slow_totals(&u, &by, &pp);
             LOG("[present] frame %llu on screen %.2f ms after the one before (taken %.2f ms into a refresh, %.2f ms after "
-                "its vkQueuePresentKHR; %llu uploads %.1f MB, %llu pipelines since)\n", (unsigned long long)id, d / 1e6,
-                per && t > vb ? (t - vb) / 1e6 : -1.0, (t - queued_at[id & 255]) / 1e6, (unsigned long long)(u - lu),
-                (by - lb) / 1048576.0, (unsigned long long)(pp - lp));
-            lu = u, lb = by, lp = pp;
+                "its vkQueuePresentKHR; %llu uploads %.1f MB, %llu pipelines since; render thread %.1f ms, of it "
+                "textures %.1f)\n", (unsigned long long)id, d / 1e6, per && t > vb ? (t - vb) / 1e6 : -1.0,
+                (t - queued_at[id & 255]) / 1e6, (unsigned long long)(u - lu), (by - lb) / 1048576.0,
+                (unsigned long long)(pp - lp), (rc - lr) / 1e6, (tc - lt) / 1e6);
+            lu = u, lb = by, lp = pp, lt = tc, lr = rc;
         }
         if (!t0) t0 = prev;
         if (shown - t0 >= 10000000000ull) {

@@ -97,12 +97,42 @@ static inline uint64_t gob_offset(uint32_t xb, uint32_t y, uint32_t z, uint32_t 
     return off;
 }
 
+// Rows [y0, y1) of every slice of a block-linear surface into linear rows (row pitch = wb * bpb). A row's bytes in a
+// GOB are four 16-byte sectors at fixed places (+0, +32, +256, +288 from the row's start in it), and the next GOB
+// across is a block further: one offset per row, four fixed-size copies per 64 bytes (working the offset out for every
+// 16 bytes ran at ~8 GB/s; this ~24, a third of the CPU time for a burst of level textures streamed in).
+static void deswizzle_rows(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, uint32_t d, uint32_t bpb,
+                           uint32_t bh_log2, uint32_t bd_log2, uint32_t y0, uint32_t y1) {
+    uint32_t row_bytes = wb * bpb;
+    uint32_t width_gobs = (row_bytes + 63) / 64;
+    uint32_t gob_rows = 8u << bh_log2;
+    uint64_t blocks_rows = (hb + gob_rows - 1) / gob_rows;
+    uint64_t block_size = 512ull << (bh_log2 + bd_log2);
+    uint32_t full = row_bytes / 64;
+    for (uint32_t z = 0; z < d; z++)
+        for (uint32_t y = y0; y < y1; y++) {
+            uint8_t *row = dst + ((uint64_t)z * hb + y) * row_bytes, *lin = row;
+            const uint8_t *s = src + gob_offset(0, y, z, width_gobs, bh_log2, bd_log2, blocks_rows);
+            for (uint32_t g = 0; g < full; g++, s += block_size, lin += 64) {
+                memcpy(lin, s, 16);
+                memcpy(lin + 16, s + 32, 16);
+                memcpy(lin + 32, s + 256, 16);
+                memcpy(lin + 48, s + 288, 16);
+            }
+            for (uint32_t x = full * 64; x < row_bytes; x += 16) {  // (a last, partial GOB)
+                uint32_t n = row_bytes - x < 16 ? row_bytes - x : 16;
+                memcpy(row + x, src + gob_offset(x, y, z, width_gobs, bh_log2, bd_log2, blocks_rows), n);
+            }
+        }
+}
+
 static void copy_surface(const uint8_t *src, uint8_t *dst, uint32_t wb, uint32_t hb, uint32_t d, uint32_t bpb,
                          uint32_t bh_log2, uint32_t bd_log2, bool to_linear) {
     uint32_t row_bytes = wb * bpb;
     uint32_t width_gobs = (row_bytes + 63) / 64;
     uint32_t gob_rows = 8u << bh_log2;
     uint64_t blocks_rows = (hb + gob_rows - 1) / gob_rows;
+    if (to_linear) { deswizzle_rows(src, dst, wb, hb, d, bpb, bh_log2, bd_log2, 0, hb); return; }
     for (uint32_t z = 0; z < d; z++) {
         for (uint32_t y = 0; y < hb; y++) {
             uint8_t *lin = dst + ((uint64_t)z * hb + y) * row_bytes;

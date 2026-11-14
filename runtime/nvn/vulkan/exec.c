@@ -651,12 +651,16 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 // game with "out of device memory").
 #define CHUNK_SIZE (64ull << 20)
 typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq; } Chunk;
-static Chunk *chunks;
-static int nchunks, active = -1;
+// Two rings: the main one, and uploads' (textures, movie frames: written once by the CPU, read once by the GPU's copy)
+// in system memory - the CPU writes it at memory speed, where its writes across PCIe into the device-local window ran
+// at ~7 GB/s (a burst of level textures, 25-48 MB in a frame: ~5 ms of copying on the render thread, now ~3.5); the
+// GPU's copy reads it across the bus instead, off the render thread.
+typedef struct { Chunk *chunks; int nchunks, active; bool host; } Ring;
+static Ring ring_main = {.active = -1}, ring_up = {.active = -1, .host = true};
 
-static int new_chunk(uint64_t size) {
-    chunks = realloc(chunks, (nchunks + 1) * sizeof *chunks);
-    Chunk *c = &chunks[nchunks];
+static int new_chunk(Ring *R, uint64_t size) {
+    R->chunks = realloc(R->chunks, (R->nchunks + 1) * sizeof *R->chunks);
+    Chunk *c = &R->chunks[R->nchunks];
     memset(c, 0, sizeof *c);
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
                              .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
@@ -672,7 +676,7 @@ static int new_chunk(uint64_t size) {
     // memory (~1 ms more GPU time a frame on a 3080 Ti at 1x). The first chunks, which most frames use, stay fast.
     // LARECOMP_VK_RING_BAR=1: no budget check.
     bool spill = false;
-    if (!sysmem && !getenv("LARECOMP_VK_RING_BAR")) {
+    if (!R->host && !sysmem && !getenv("LARECOMP_VK_RING_BAR")) {
         uint32_t type;
         if (vmaFindMemoryTypeIndexForBufferInfo(g_vk.vma, &bi, &ai, &type) == VK_SUCCESS) {
             const VkPhysicalDeviceMemoryProperties *mp;
@@ -690,43 +694,44 @@ static int new_chunk(uint64_t size) {
             }
         }
     }
-    if (sysmem || spill || getenv("LARECOMP_VK_RING_SYSMEM")) ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;  // (test: a GPU without resizable BAR)
+    if (R->host || sysmem || spill || getenv("LARECOMP_VK_RING_SYSMEM")) ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;  // (test: a GPU without resizable BAR)
     VmaAllocationInfo info;
     VkResult r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
     bool moved = false;
     // (a driver may report the full window as out of host memory too; if memory is really gone, the retry fails as well)
     if ((r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_HOST_MEMORY) && ai.usage != VMA_MEMORY_USAGE_AUTO_PREFER_HOST) {
-        LOG("[vk] transient ring: device-local memory full after %d chunks, system memory from now on\n", nchunks);
+        LOG("[vk] transient ring: device-local memory full after %d chunks, system memory from now on\n", R->nchunks);
         vk_log_memory("ring chunk failed");
         sysmem = moved = true;
         ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
     }
     if (r != VK_SUCCESS) {  // (system memory too: vk_transient waits for a chunk to come free instead - issue #45)
-        LOG("[vk] transient ring: no memory for chunk %d (%llu MB, error %d)\n", nchunks, (unsigned long long)(size >> 20), r);
+        LOG("[vk] %s ring: no memory for chunk %d (%llu MB, error %d)\n", R->host ? "upload" : "transient", R->nchunks,
+            (unsigned long long)(size >> 20), r);
         vk_log_memory("ring chunk failed");
         return -1;
     }
     c->ptr = info.pMappedData;
     c->size = size;
     static bool spilled;  // (the first chunk in system memory: logged too)
-    if (!nchunks || moved || (spill && !spilled)) {  // where the ring lives: device-local (resizable BAR) or system memory read across PCIe
+    if (!R->nchunks || moved || (spill && !spilled)) {  // where the ring lives: device-local (resizable BAR) or system memory read across PCIe
         if (spill) spilled = true;
         VkMemoryPropertyFlags f;
         vmaGetMemoryTypeProperties(g_vk.vma, info.memoryType, &f);
-        LOG("[vk] transient ring: memory type %u (%s%s%s)\n", info.memoryType, f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? "device-local " : "system memory ",
+        LOG("[vk] %s ring: memory type %u (%s%s%s)\n", R->host ? "upload" : "transient", info.memoryType, f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? "device-local " : "system memory ",
             f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ? "host-visible " : "", f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ? "cached" : "");
     }
-    return nchunks++;
+    return R->nchunks++;
 }
 
 static void ring_retire(void) {}  // chunks are recycled lazily in vk_transient
 
-VkSpan vk_transient(uint64_t size, uint64_t align) {
+static VkSpan ring_alloc(Ring *R, uint64_t size, uint64_t align) {
     if (align < 16) align = 16;
     uint64_t pending = vk_pending_seq();
-    if (active >= 0) {
-        Chunk *c = &chunks[active];
+    if (R->active >= 0) {
+        Chunk *c = &R->chunks[R->active];
         uint64_t off = (c->used + align - 1) & ~(align - 1);
         if (off + size <= c->size) {
             c->used = off + size;
@@ -737,26 +742,28 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
     }
     uint64_t done = vk_completed_seq();
     int pick = -1;
-    for (int i = 0; i < nchunks; i++)
-        if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
-    if (pick < 0) pick = new_chunk(size > CHUNK_SIZE ? size : CHUNK_SIZE);
+    for (int i = 0; i < R->nchunks; i++)
+        if (i != R->active && R->chunks[i].seq <= done && R->chunks[i].size >= size) { pick = i; break; }
+    if (pick < 0) pick = new_chunk(R, size > CHUNK_SIZE ? size : CHUNK_SIZE);
     if (pick < 0) {  // no memory for another chunk (a GTX 1060 with 6 GB: issue #45): wait for the work already submitted,
         // which frees the chunks only it used, and take one of those (the recording in progress keeps its own)
         vk_wait_seq(submit_seq);
         done = vk_completed_seq();
-        for (int i = 0; i < nchunks; i++)
-            if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
+        for (int i = 0; i < R->nchunks; i++)
+            if (i != R->active && R->chunks[i].seq <= done && R->chunks[i].size >= size) { pick = i; break; }
         if (pick < 0) FATAL("the graphics card ran out of memory for uploads (%llu MB needed, %d chunks in use)\n",
-                            (unsigned long long)(size >> 20), nchunks);
+                            (unsigned long long)(size >> 20), R->nchunks);
         static int nlog;
         if (nlog++ < 5) LOG("[vk] transient ring: reused chunk %d after waiting for the GPU\n", pick);
     }
-    active = pick;
-    chunks[pick].used = size;
-    chunks[pick].seq = pending;
+    R->active = pick;
+    R->chunks[pick].used = size;
+    R->chunks[pick].seq = pending;
     stat_upload_bytes += size;
-    return (VkSpan){chunks[pick].buf, 0, chunks[pick].ptr};
+    return (VkSpan){R->chunks[pick].buf, 0, R->chunks[pick].ptr};
 }
+VkSpan vk_transient(uint64_t size, uint64_t align) { return ring_alloc(&ring_main, size, align); }
+VkSpan vk_transient_upload(uint64_t size, uint64_t align) { return ring_alloc(&ring_up, size, align); }
 
 // GPU -> CPU copies: the ring is write-combined (often device-local over the BAR), where CPU reads crawl (a
 // 1280x720 screenshot took 7 s). Readbacks use one host-cached buffer instead. Every user waits for the GPU and
@@ -6851,7 +6858,9 @@ void vk_convert_nv12(TexBackend *b, const void *nv12, uint32_t w, uint32_t h, ui
     VkImageView vuv = vk_image_view(&puv, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8_UNORM, 0, 1, 0, 1, ident, VK_IMAGE_ASPECT_COLOR_BIT);
     VkImageView vt = vk_image_view(b, VK_IMAGE_VIEW_TYPE_2D, raw, 0, 1, 0, 1, ident, VK_IMAGE_ASPECT_COLOR_BIT);
     if (!vy || !vuv || !vt) return;
-    VkSpan s = vk_transient_copy(nv12, (uint64_t)uv_off + (uint64_t)stride * (h / 2), 16);
+    uint64_t nv12_size = (uint64_t)uv_off + (uint64_t)stride * (h / 2);
+    VkSpan s = vk_transient_upload(nv12_size, 16);  // (system memory: read once, by the conversion)
+    memcpy(s.ptr, nv12, nv12_size);
     VkBufferImageCopy c[2] = {
         {.bufferOffset = s.off, .bufferRowLength = stride, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
          .imageExtent = {w, h, 1}},

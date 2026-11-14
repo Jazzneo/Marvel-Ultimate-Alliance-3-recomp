@@ -178,7 +178,7 @@ Added in this project:
 | `LARECOMP_PRESENT_PACE=0` | uncapped frame rate |
 | `LARECOMP_PACE_LOCK=0` | frames not locked to the display's refresh (the pace's own 60 Hz clock, as before) |
 | `LARECOMP_LOG_PACE_LOCK=1` | each frame's slot, lead and correction (the display lock) |
-| `LARECOMP_PRESENT_TIMING=0` / `=2` | no `[present]` cadence lines / one line per frame (when it reached the screen, where in the refresh, uploads and pipelines since) |
+| `LARECOMP_PRESENT_TIMING=0` / `=2` | no `[present]` cadence lines / one line per frame (when it reached the screen, where in the refresh, uploads and pipelines since, the render thread's time and its texture part) |
 
 Inherited from LAS Recomp and used here:
 
@@ -537,6 +537,28 @@ Expansion Pass.
 - The build workers now take a draw's first-use builds before preparation's, and run preparation's below the normal
   priority (`plat_thread_background`): on a new install the background builds no longer hold up a new area's
   pipelines or the game's own threads.
+
+## Textures streamed in: less of the render thread (2026-11-14)
+
+- **Measured** (`LARECOMP_PRESENT_TIMING=2`: each frame's render-thread time and the part of it spent on textures):
+  textures arrive in bursts - a hundred or more at once while a level loads, two of 8 MB at a time, 25-48 MB in a
+  frame while the opening movie plays over the first level loading - and the render thread hashed each new
+  texture's contents, copied it out of the GPU's tiled layout into the upload ring, and recorded the copy: up to
+  11 ms in one frame here (8 cores), 17 frames over 4 ms in the route from the title through the opening movie. On a
+  slower CPU, the same bursts are missed frames.
+- **The upload ring in system memory** (`vulkan/exec.c` `vk_transient_upload`): texture contents and movie frames
+  went into the device-local window, which the CPU writes across PCIe (~7 GB/s here); now a ring of their own in
+  system memory, which it writes at memory speed, and the GPU's copy reads across the bus instead. The main ring
+  (uniforms, vertices: read by shaders) stays where it was. The copying went from 102 to 55 ms over the route.
+- **The tiled layout's copy** (`runtime/nvn/tegra.c` `deswizzle_rows`): one offset per row and four fixed 16-byte
+  copies per 64 bytes, where the offset was worked out for every 16 bytes: three times as fast on its own (24 GB/s
+  against 8), byte for byte the same over 3000 layouts.
+- **Checked:** the route's texture time 288 -> 240 ms, frames over 4 ms 17 -> 9, over 6 ms 5 -> 3; the movie and the
+  level look as before. Splitting a texture's hash and copy over helper threads gained nothing here (the copy waits
+  on memory, not the CPU) and isn't kept. The hash, about a third of what's left, would go with a single pass that
+  hashes while it copies.
+- **Not textures:** the few late frames left at the opening movie's end are the game's own threads waiting on each
+  other while its movie player shuts down (the presenting thread waits 60-80 ms with its own CPU idle, now and then).
 
 ## Status (MUA3, 2026-11-01)
 
