@@ -176,6 +176,9 @@ Added in this project:
 | `LARECOMP_LOG_STAGES=<n>` | the first n shaders' headers and their stages |
 | `LARECOMP_SHADER_SURVEY=1` | log every unknown instruction in a shader |
 | `LARECOMP_PRESENT_PACE=0` | uncapped frame rate |
+| `LARECOMP_PACE_LOCK=0` | frames not locked to the display's refresh (the pace's own 60 Hz clock, as before) |
+| `LARECOMP_LOG_PACE_LOCK=1` | each frame's slot, lead and correction (the display lock) |
+| `LARECOMP_PRESENT_TIMING=0` / `=2` | no `[present]` cadence lines / one line per frame (when it reached the screen, where in the refresh, uploads and pipelines since) |
 
 Inherited from LAS Recomp and used here:
 
@@ -487,6 +490,53 @@ Expansion Pass.
 - **`make dist`'s check for this machine's paths:** make's shell has no `USERPROFILE` / `USERNAME`, so the profile
   pattern had been just `C:/Users/` (it matched text in Python's DLL). The user name now comes from `HOME` when
   needed, the check stops if it has none, and the MSYS2 home folder is checked too.
+
+## Stutter in play and in cutscenes; shaders prepared for a new install (2026-11-14)
+
+### Measured first: what reaches the screen (`runtime/nvn/vulkan/present_timing.c`)
+
+- Every present now carries an id (`VK_KHR_present_id` / `VK_KHR_present_wait`, where the driver has them) and a
+  thread notes when the compositor takes each frame; with the display's vblank (`plat_display_vblank`: the desktop
+  compositor's timing) that says which refresh it is shown at. A `[present]` line every ~10 s: frames held 1 / 2 / 3+
+  refreshes, and where in a refresh they were taken.
+- **Found** (RTX 3060, a 60.00 Hz display, 30 fps, the 5.5-minute route from the title through the opening movie to
+  "Follow the Scanner"): the average was 30.0 fps throughout, but 107 frames were held one refresh or three instead of
+  two - 41 of them in the opening movie. The display pacing (`present_pace`) ran on its own 60 Hz clock, which drifts
+  against the display's, and where the frames' hand-over came close to a vblank, a frame a little late waited a whole
+  refresh more and the next one a refresh less. At 59.94 Hz that happens every 17 s, at 144 Hz all the time.
+
+### Frames locked to the display (`runtime/nvn/objects.c`, `runtime/kernel.c`, `vulkan/record.c`, `vulkan/device.c`)
+
+- When the setting's frame period is a whole number of the display's refreshes (or at most 2% slower: 29.97 fps at
+  59.94 Hz), frames are paced that many refreshes apart, on the display's own clock. The game's frame limiter follows
+  the same clock, so the two can't drift apart. Never faster than the setting (no speed-up).
+- Each frame gets a slot 2 ms into a refresh; the recorder holds the present until then. Every frame reaches the
+  compositor at the same point of a refresh, and one whose work runs long still makes its vblank with most of a refresh
+  to spare. The time a frame needs before its slot (the lead) follows the GPU's measured time for the slowest of the
+  last 30 frames: the opening movie runs over a 3D scene (13 ms of GPU a frame here, against ~5 ms in play), and
+  handed over as soon as they were done, its heavier frames missed their vblank.
+- Not locked: another display than the primary one (the compositor's timing is the primary's), frame rates the display
+  can't divide (30 at 144 Hz), above the display's rate (120 at 60 Hz) - there, the pacing as before. A safety net
+  turns the lock off for the session if, locked, more than a tenth of the frames are off the cadence for 20 s.
+- **Checked:** the same route at 30 fps: 0 frames off the cadence (107 before), the opening movie included; at 60 fps:
+  0; game time at real time at 30, 60 and 120 (`LARECOMP_LOG_GAMETIME`).
+
+### A shader cache for a new install (`runtime/nvn/shader_variants.txt`, `shader_code_locs.txt`, `tools/shader_locs.py`)
+
+- The shipped shader list (the pipeline variants prepared at startup) was DOAX3's empty one: a new install built every
+  shader the first time it was drawn - 253 first-use builds from the title into the first level, each object missing
+  for a frame or two while its pipeline compiled, and the compiles competing with the game for the CPU.
+- Now 198 variants ship: the title, menus, the opening movie and the first level. Only hashes and pipeline state, as
+  before; the code is found in the player's own game files. MUA3 keeps its shaders in its shader packages
+  (`SHADER/**/*.spkg`, `*.kps`), which are read in place from the NSPs, so `shader_code_locs.txt` says where each
+  shader is: file, offset, size (`tools/shader_locs.py` writes it from a play's `cache/shader_code` and the extracted
+  files; 165 of 173 found, 14 of them in the main module; the other 8 the game compiles itself at run time). The bytes
+  are read from the player's copy and checked against the hash before anything is built from them.
+- **Checked** (no `cache/` folder, a new driver shader cache): 182 variants prepared at the first start, 18 first-use
+  builds in the same route (253 before).
+- The build workers now take a draw's first-use builds before preparation's, and run preparation's below the normal
+  priority (`plat_thread_background`): on a new install the background builds no longer hold up a new area's
+  pipelines or the game's own threads.
 
 ## Status (MUA3, 2026-11-01)
 

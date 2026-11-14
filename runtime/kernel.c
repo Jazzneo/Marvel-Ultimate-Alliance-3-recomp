@@ -725,10 +725,20 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         // each frame ran ~0.25 ms past its period - and its time step (its period, when the measured time is close)
         // left that out: the world ran 0.7% slow at 30, 1.5% at 60, 2.7% at 120. A wake within a quarter period of the
         // next grid point is moved onto it; a frame that ran long keeps its own and starts the grid again.
+        // Where the display pacing keeps its own frame clock (runtime/nvn/objects.c: locked to the display, e.g. 29.97
+        // fps at 59.94 Hz), the grid is that clock's - half a frame before each present - so the two never drift
+        // apart (the limiter's 30.000 would run ahead of a 59.94 Hz display's frames and take the pacing over).
         if (ns < 50000000 && game_frame_limiter_sleep(c->x[30])) {
             extern uint64_t game_frame_period_ns(void);  // runtime/hle/game_hooks.c
+            extern uint64_t g_pace_period_ns, g_pace_next_ns;  // runtime/nvn/objects.c
             static uint64_t grid;  // (the last wake)
             uint64_t now = plat_now_ns(), want = now + (uint64_t)ns, period = game_frame_period_ns(), next = grid + period;
+            uint64_t pp = g_pace_period_ns, pn = g_pace_next_ns;
+            if (pp && pn && period && pp * 10 > period * 9 && pp * 10 < period * 11) {
+                period = pp, next = pn - pp / 2;
+                while (next > want + pp / 2) next -= pp;  // (the clock's point nearest the game's own wake)
+                while (next + pp / 2 < want) next += pp;
+            }
             if (period && grid && next > now && want + period / 4 > next && want < next + period / 4) want = next;
             plat_sleep_until_ns(want);
             grid = want;

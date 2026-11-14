@@ -186,6 +186,60 @@ uint64_t plat_now_ns(void) {
     return (uint64_t)((unsigned __int128)t.QuadPart * 1000000000u / (uint64_t)qpf.QuadPart);
 }
 
+// The display's refresh: the desktop compositor's latest vblank and its refresh period (DwmGetCompositionTimingInfo,
+// loaded at the first call: no link-time dependency). Read at most every 250 ms; between reads the vblank is
+// extrapolated. False: not known - or the game window is on another display than the primary one, whose timing the
+// compositor's is (another display's vblanks needn't line up with it, even at the same rate).
+#include <dwmapi.h>
+static HWND display_hwnd;
+void plat_display_window(void *native) { display_hwnd = (HWND)native; }
+static bool on_primary(void) {
+    static uint64_t at;
+    static bool primary = true;
+    uint64_t now = plat_now_ns();
+    if (display_hwnd && now - at > 1000000000ull) {  // (checked once a second: the window can be moved)
+        at = now;
+        POINT o = {0, 0};
+        primary = MonitorFromWindow(display_hwnd, MONITOR_DEFAULTTONEAREST) == MonitorFromPoint(o, MONITOR_DEFAULTTOPRIMARY);
+    }
+    return primary;
+}
+bool plat_display_vblank(uint64_t *last_ns, uint64_t *period_ns) {
+    typedef HRESULT(WINAPI * TimingFn)(HWND, DWM_TIMING_INFO *);
+    static TimingFn fn;
+    static int tried;
+    static SRWLOCK lk = SRWLOCK_INIT;
+    static uint64_t vb, per, read_at;
+    if (!tried) {
+        HMODULE m = LoadLibraryW(L"dwmapi.dll");
+        fn = m ? (TimingFn)(void *)GetProcAddress(m, "DwmGetCompositionTimingInfo") : NULL;
+        tried = 1;
+    }
+    if (!fn || !on_primary()) return false;
+    uint64_t now = plat_now_ns();
+    AcquireSRWLockExclusive(&lk);
+    if (!per || now - read_at > 250000000ull) {
+        DWM_TIMING_INFO ti = {.cbSize = sizeof ti};
+        if (SUCCEEDED(fn(NULL, &ti)) && ti.qpcVBlank && ti.qpcRefreshPeriod) {
+            if (!qpf.QuadPart) QueryPerformanceFrequency(&qpf);
+            uint64_t f = (uint64_t)qpf.QuadPart;
+            vb = (uint64_t)((unsigned __int128)ti.qpcVBlank * 1000000000u / f);
+            per = ti.rateRefresh.uiNumerator && ti.rateRefresh.uiDenominator
+                      ? (uint64_t)(1000000000ull * ti.rateRefresh.uiDenominator / ti.rateRefresh.uiNumerator)
+                      : (uint64_t)((unsigned __int128)ti.qpcRefreshPeriod * 1000000000u / f);
+            if (per < 2000000 || per > 50000000) per = 0;  // (not a display rate: 20 to 500 Hz)
+        }
+        read_at = now;
+    }
+    uint64_t v = vb, p = per;
+    ReleaseSRWLockExclusive(&lk);
+    if (!p) return false;
+    if (now > v) v += (now - v) / p * p;  // (the latest vblank at or before now: the compositor's can be the next one)
+    else v -= (v - now + p - 1) / p * p;
+    *last_ns = v, *period_ns = p;
+    return true;
+}
+
 // The calling thread's CPU time. GetThreadTimes only advances in whole scheduler ticks (15.6 ms): per frame that reads
 // 0 or 15.6. QueryThreadCycleTime counts the thread's cycles exactly, in TSC ticks on x64 (invariant TSC), so
 // those are converted with the TSC rate measured once against the performance counter (20 ms, at the first call).
@@ -337,6 +391,10 @@ void plat_thread_perf_core(int role) {
     if (role < 0 || role > 2 || (InterlockedOr(&logged, 1 << role) & (1 << role))) return;
     fprintf(stderr, "[pcore] %s thread: power throttling %s%s%s\n", names[role], thr ? "off" : "unchanged (refused)",
             pcore_how, sets ? "" : " (CPU sets refused)");
+}
+
+void plat_thread_background(bool on) {
+    SetThreadPriority(GetCurrentThread(), on ? THREAD_PRIORITY_BELOW_NORMAL : THREAD_PRIORITY_NORMAL);
 }
 
 void plat_thread_realtime(uint64_t period_ns) {

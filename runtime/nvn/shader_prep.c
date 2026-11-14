@@ -282,7 +282,9 @@ void shader_first_visit(const char *what, uint64_t a, uint64_t b, uint64_t id) {
 typedef struct { uint64_t hash; uint32_t file, off, size, const_offset, const_size; } IdxEnt;
 static IdxEnt *idx_tab;
 static size_t idx_cap, idx_n;
-typedef struct { char *path; uint8_t *mem; } IdxSrc;  // a game file, or (the main module's read-only data) memory
+typedef struct { char *path; uint8_t *mem; uint64_t rom; } IdxSrc;  // a game file, (the main module's read-only data)
+                                                                 // memory, or a romfs file read in place (rom: its
+                                                                 // offset in the image + 1)
 static IdxSrc *idx_files;
 static int idx_nfiles;
 
@@ -502,10 +504,52 @@ static void idx_store(void) {
     closedir(dd);
 }
 
+// MUA3's shaders are in its shader packages (SHADER/**/*.spkg, *.kps), which are read in place from the NSPs: no
+// file to scan. runtime/nvn/shader_code_locs.txt (tools/shader_locs.py) says where each shader of the shipped list is
+// in them - file, offset, size, constants - and the index takes those places; the bytes are read from the player's
+// own copy when a variant is prepared, and checked against the hash first (another version of a file: not found).
+static const char code_locs[] =
+#include "shader_code_locs.inc"
+    ;
+#define LOC_MAIN UINT64_MAX  // (IdxSrc.rom: "@main", the main module as loaded at MAIN_BASE)
+bool romfs_file_find(const char *rel, uint64_t *off, uint64_t *size);  // (runtime/services/fs.c)
+ssize_t romfs_image_read(void *dst, uint64_t n, uint64_t off);
+static void idx_locs(void) {
+    int added = 0;
+    for (const char *l = code_locs, *e; *l; l = *e ? e + 1 : e) {
+        e = strchr(l, '\n');
+        if (!e) e = l + strlen(l);
+        char path[512];
+        unsigned long long h, off, size, coff, csize;
+        if (*l == '#' || e - l >= 600 || sscanf(l, "%llx %511s %llu %llu %llu %llu", &h, path, &off, &size, &coff, &csize) != 6)
+            continue;
+        uint64_t foff, fsize;
+        if (!strcmp(path, "@main")) foff = LOC_MAIN - 1, fsize = SDK_BASE - MAIN_BASE;  // (the main module, loaded)
+        else if (!romfs_file_find(path, &foff, &fsize)) continue;
+        if (idx_find(h) || coff + csize != size || off + size > fsize) continue;
+        int file = idx_nfiles - 1;
+        while (file >= 0 && idx_files[file].rom != foff + 1) file--;  // (the file's entry, if it has one)
+        if (file < 0) {
+            idx_files = realloc(idx_files, sizeof *idx_files * (size_t)(idx_nfiles + 1));
+            idx_files[idx_nfiles] = (IdxSrc){NULL, NULL, foff + 1};
+            file = idx_nfiles++;
+        }
+        idx_add(h, (uint32_t)file, (uint32_t)off, (uint32_t)size, (uint32_t)coff, (uint32_t)csize);
+        added++;
+    }
+    if (added) LOG("[shader] %d shaders located in the game's shader packages and its main module\n", added);
+}
+
 // The shader's code (+ its constants), read from the game files; NULL: not there
 static uint8_t *blob_read(const IdxEnt *e, ShaderBlob *b, FILE **files) {
     uint8_t *d = calloc(1, (size_t)e->size + 0x100);  // (zero padding past the constants)
-    if (idx_files[e->file].mem) memcpy(d, idx_files[e->file].mem + e->off, e->size);
+    if (idx_files[e->file].rom == LOC_MAIN) {
+        memcpy(d, (const void *)(uintptr_t)(MAIN_BASE + e->off), e->size);
+        if (shader_code_hash(d, e->size) != e->hash) { free(d); return NULL; }
+    } else if (idx_files[e->file].rom) {
+        if (romfs_image_read(d, e->size, idx_files[e->file].rom - 1 + e->off) != (ssize_t)e->size ||
+            shader_code_hash(d, e->size) != e->hash) { free(d); return NULL; }
+    } else if (idx_files[e->file].mem) memcpy(d, idx_files[e->file].mem + e->off, e->size);
     else {
         FILE **f = &files[e->file];
         if (!*f && !(*f = fopen(idx_files[e->file].path, "rb"))) { free(d); return NULL; }
@@ -611,9 +655,16 @@ static bool prep_run_locked(const char *romfs, void (*progress)(int done, int to
     if (!idx_n) {
         idx_dir(romfs, 0);
         char main_nso[1100];  // (<game files>/exefs/main, next to romfs/)
-        snprintf(main_nso, sizeof main_nso, "%s/../exefs/main", romfs);
+        // (the folder above romfs/ by name, not "romfs/..": the romfs is read in place from the NSPs, no folder)
+        snprintf(main_nso, sizeof main_nso, "%s", romfs);
+        for (size_t l = strlen(main_nso); l && (main_nso[l - 1] == '/' || main_nso[l - 1] == '\\');) main_nso[--l] = 0;
+        char *cut = strrchr(main_nso, '/'), *cut2 = strrchr(main_nso, '\\');
+        if (cut2 > cut) cut = cut2;
+        if (cut) snprintf(cut, sizeof main_nso - (size_t)(cut - main_nso), "/exefs/main");
+        else snprintf(main_nso, sizeof main_nso, "exefs/main");
         idx_nso(main_nso);
         idx_store();
+        idx_locs();
     }
     double t_idx = ms_now() - t0;
     if (idx_n) {  // (the player's list of other game files - none yet, or an update: only what this game has)

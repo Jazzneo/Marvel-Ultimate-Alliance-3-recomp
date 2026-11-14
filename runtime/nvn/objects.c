@@ -827,6 +827,120 @@ NVN(nvnQueueAcquireTexture) {
     w->next = (w->next + 1) % (w->active ? w->active : 1);
     RET(0);
 }
+// ---- the display pacing, locked to the display (Windows: plat_display_vblank, the primary display): when the
+// setting's frame period is k refreshes of the display - or at most 2% slower (a 59.94 Hz display: 29.97 fps) -
+// frames are paced k refreshes apart, each in its slot of a refresh (pace_slot). Without that the pace ran on its own
+// 60 Hz clock, which drifts against any display's: a frame handed over close to a vblank waits a whole refresh more
+// when a little late, and the one after it a refresh less - the judder a steady frame rate doesn't show (here at a
+// 60.00 Hz display, 107 of ~9800 frames in 5.5 minutes, 41 of them in the opening movie; at 59.94 Hz every 17 s).
+// Never faster than the setting (the game's time step is at least its frame period: faster would be a speed-up).
+// Otherwise (a 144 Hz display at 30, frame rates above the display's, another display than the primary one) the
+// setting's own period, as before. LARECOMP_PACE_LOCK=0: off.
+uint64_t g_pace_period_ns;  // the frame period kept when locked to the display (0: not locked); the game's limiter
+                            // follows it then (runtime/kernel.c)
+uint64_t g_pace_next_ns;    // the next frame's present
+static bool said_r_lock;  // (locked at the last frame)
+static uint64_t pace_locked_period(uint64_t want, uint64_t *refresh) {
+    static int lock = -1;
+    if (lock < 0) { const char *e = getenv("LARECOMP_PACE_LOCK"); lock = !e || atoi(e) != 0; }
+    {   // a safety net: locked, but more than a tenth of the frames off the display's cadence in two ~10 s stretches
+        // in a row (where the compositor's timing isn't the display's after all): the lock off for the session
+        extern void present_timing_cadence(uint64_t *frames, uint64_t *off);
+        static uint64_t f0, o0, at;
+        static int bad;
+        uint64_t f, o, now = plat_now_ns();
+        if (lock && said_r_lock && now - at > 10000000000ull) {
+            present_timing_cadence(&f, &o);
+            bad = f - f0 >= 200 && (o - o0) * 10 > f - f0 ? bad + 1 : 0;
+            if (bad >= 2) {
+                lock = 0;
+                LOG("[pace] %llu of the last %llu frames off the display's cadence while locked to it: lock off\n",
+                    (unsigned long long)(o - o0), (unsigned long long)(f - f0));
+            }
+            f0 = f, o0 = o, at = now;
+        }
+    }
+    uint64_t vb, per, k, f = want;
+    *refresh = 0;
+    if (lock && plat_display_vblank(&vb, &per) && (k = (want + per / 2) / per) >= 1) {
+        f = k * per;
+        if (f * 1000 >= want * 995 && f * 100 <= want * 102) *refresh = per;
+        else f = want;
+    }
+    static uint64_t said_f, said_r;
+    if (f != said_f || *refresh != said_r) {
+        if (*refresh)
+            LOG("[pace] frames locked to the display: %llu refreshes of %.3f ms (%.2f Hz) apart, %.3f ms (%.2f fps)\n",
+                (unsigned long long)(f / *refresh), *refresh / 1e6, 1e9 / (double)*refresh, f / 1e6, 1e9 / (double)f);
+        else LOG("[pace] frames %.3f ms apart (%.2f fps), not locked to the display%s\n", f / 1e6, 1e9 / (double)f,
+                 lock ? "" : " (LARECOMP_PACE_LOCK=0)");
+        said_f = f, said_r = *refresh;
+    }
+    said_r_lock = *refresh != 0;
+    return f;
+}
+// The frame's slot: a point PACE_HOLD_NS into a refresh, `lead` after its present - the time its render-thread and GPU
+// work take (below); at most half a frame, so the render thread isn't held into the next frame's work. The recorder
+// holds the present until the slot (record.c): every frame then reaches the compositor at the same point of a refresh,
+// and one whose work runs long still makes its vblank up to most of a refresh after the slot. (Handed over as soon as
+// its GPU work was done, a frame a few ms slower than usual - a heavy movie frame, a burst of level textures - missed
+// it.) The present's time (next) is steered so present + lead falls on the slot: a start goes there at once, after
+// that at most 0.3 ms a frame.
+#define PACE_HOLD_NS 2000000
+extern void present_timing_lateness(uint64_t *frames, uint64_t *late);  // (the backend's)
+static int64_t pace_phase_err(uint64_t at, uint64_t vb, uint64_t refresh) {  // at's distance from the slot point
+    int64_t into = (int64_t)((at > vb ? at - vb : refresh - (vb - at) % refresh) % refresh);
+    int64_t err = into - PACE_HOLD_NS;
+    if (err > (int64_t)refresh / 2) err -= (int64_t)refresh;
+    else if (err < -(int64_t)refresh / 2) err += (int64_t)refresh;
+    return err;
+}
+static uint64_t pace_slot(uint64_t next, uint64_t refresh, uint64_t period, bool fresh, uint64_t *slot) {
+    // the lead: the GPU's time for the slowest of the last 30 frames (the backend's timer, read a few frames late) plus
+    // 2 ms, so a heavier stretch (a movie over a 3D scene: 13 ms of GPU work a frame here, against ~5 in play) moves
+    // the slot within a frame or two; and a millisecond more, kept, when frames still come a third of a refresh after it
+    extern int64_t pace_gpu_ns(void);  // (the backend's: GPU time so far, -1: no timer)
+    static double extra;
+    static uint64_t frames0, late0, gpu_win[30];
+    static int64_t gpu_last = -1;
+    static int nf, calm, gi;
+    *slot = 0;
+    int64_t g = pace_gpu_ns();
+    if (g >= 0 && gpu_last >= 0 && g >= gpu_last) gpu_win[gi++ % 30] = (uint64_t)(g - gpu_last);
+    gpu_last = g;
+    uint64_t gpu_max = 0;
+    for (int i = 0; i < 30; i++) if (gpu_win[i] > gpu_max && gpu_win[i] < 100000000ull) gpu_max = gpu_win[i];
+    if (++nf >= 16) {
+        nf = 0;
+        uint64_t f, l;
+        present_timing_lateness(&f, &l);
+        if (l > late0) extra += 1e6, calm = 0;
+        else if (f > frames0 && ++calm >= 32 && extra > 0) extra -= 2.5e5, calm = 0;
+        if (extra > 8e6) extra = 8e6;
+        if (extra < 0) extra = 0;
+        frames0 = f, late0 = l;
+    }
+    double lead_max = period / 2.0 - 5e5;
+    if (lead_max > 16e6) lead_max = 16e6;
+    double lead = (g >= 0 ? (double)gpu_max + 2e6 : 6e6) + extra;
+    if (lead > lead_max) lead = lead_max;
+    if (lead < 3e6) lead = 3e6;
+    uint64_t vb, r;
+    if (!plat_display_vblank(&vb, &r) || r != refresh) return next;
+    int64_t err = pace_phase_err(next + (uint64_t)lead, vb, refresh);
+    int64_t c = fresh ? -err : -err / 4;
+    if (!fresh) c = c > 300000 ? 300000 : c < -300000 ? -300000 : c;
+    if (fresh && c < 0) c += (int64_t)refresh;  // (a start: later, not into the past)
+    next = (uint64_t)((int64_t)next + c);
+    uint64_t at = next + (uint64_t)lead;
+    *slot = (uint64_t)((int64_t)at - pace_phase_err(at, vb, refresh));
+    static int log = -1;
+    if (log < 0) log = getenv("LARECOMP_LOG_PACE_LOCK") != NULL;
+    if (log) LOG("[pace] present moved %+.3f ms, lead %.2f ms, slot %.2f ms after it\n", c / 1e6, lead / 1e6,
+                 ((int64_t)*slot - (int64_t)next) / 1e6);
+    return next;
+}
+
 // The display's pace. On the Switch the window's textures come back from the display at vsyncs: with the game's
 // present interval n, a frame every n vsyncs (60 Hz / n), and the game's next acquire waits for one. DOAX3 has no
 // timer of its own (it never asks for the vsync event): without this wait it ran as fast as the PC could draw
@@ -854,17 +968,25 @@ static void present_pace(int interval) {
     }
     if (!on || interval <= 0) return;
     if (interval > 4) interval = 4;
-    static uint64_t next;
     extern volatile uint64_t g_vsync_period;  // (runtime/hle/vi.c: the display's vsync)
-    uint64_t period = g_vsync_period * (uint64_t)interval, now = plat_now_ns();
-    if (!next || now > next + period) next = now;
-    else if (next > now) plat_sleep_until_ns(next);
-    next += period;
+    uint64_t want = g_vsync_period * (uint64_t)interval, now = plat_now_ns(), refresh = 0;
+    uint64_t period = pace_locked_period(want, &refresh);
+    g_pace_period_ns = refresh ? period : 0;  // (not locked: the limiter keeps its own grid, as before)
+    bool fresh = !g_pace_next_ns || now > g_pace_next_ns + period;  // (a start, or late by more than a frame)
+    if (fresh) g_pace_next_ns = now;
+    uint64_t slot = 0;
+    if (refresh) g_pace_next_ns = pace_slot(g_pace_next_ns, refresh, period, fresh, &slot);
+    if (g_pace_next_ns > now) plat_sleep_until_ns(g_pace_next_ns);
+    extern uint64_t g_present_target_ns;  // (the backend: the recorder holds the present until its slot)
+    g_present_target_ns = slot;
+    g_pace_next_ns += period;
 }
 
+int g_present_interval;  // (the game's present interval at its latest present: present_timing.c's cadence)
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+    g_present_interval = w->interval;
     present_pace(w->interval);
     if (i >= 0 && i < w->num) backend_present(HOST(NvnTexture, w->textures[i]));
 }

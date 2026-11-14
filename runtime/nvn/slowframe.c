@@ -20,6 +20,9 @@ void slow_note_build(const char *what, uint64_t ns) {
 void slow_note_cache_hit(void) { ADD(n_hits, 1); }
 void slow_note_upload(uint64_t bytes) { ADD(n_uploads, 1), ADD(upload_bytes, bytes); }
 void slow_note_full_hash(void) { ADD(n_hashes, 1); }
+void slow_totals(uint64_t *uploads, uint64_t *bytes, uint64_t *pipes) {  // (present_timing.c's per-frame log)
+    *uploads = GET(n_uploads), *bytes = GET(upload_bytes), *pipes = GET(n_pipes);
+}
 ShaderInfo *slow_translate(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key) {
     uint64_t t0 = plat_now_ns();
     ShaderInfo *r = maxwell_translate(code, max_size, stage, key);

@@ -831,20 +831,27 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) { return guest_copy_ex(ad
 // ================================================================== worker threads (shader / pipeline builds)
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
 // LARECOMP_SYNC_SHADERS=1 builds on first use, blocking (deterministic tests).
+// Two queues: what a draw is waiting for now (first use), and shader preparation's (shader_prep.c: the shipped list
+// and the player's own, at startup and on in the background) - the first always taken first, and preparation's run
+// at a lower priority (plat_thread_background), so neither a new area's pipelines wait behind a few hundred prepared
+// ones nor the game's own threads behind the builds (a fresh install's first start: minutes of compiles here).
 typedef struct Job { void (*fn)(void *); void *arg; struct Job *next; } Job;
-static Job *jobs_head, *jobs_tail;
+static Job *jobs_head, *jobs_tail, *bg_head, *bg_tail;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 
 static void *worker(void *a) {
     (void)a;
+    bool low = false;
     for (;;) {
         pthread_mutex_lock(&jobs_lock);
-        while (!jobs_head) pthread_cond_wait(&jobs_cond, &jobs_lock);
-        Job *j = jobs_head;
-        jobs_head = j->next;
-        if (!jobs_head) jobs_tail = NULL;
+        while (!jobs_head && !bg_head) pthread_cond_wait(&jobs_cond, &jobs_lock);
+        bool bg = !jobs_head;
+        Job **head = bg ? &bg_head : &jobs_head, **tail = bg ? &bg_tail : &jobs_tail, *j = *head;
+        *head = j->next;
+        if (!*head) *tail = NULL;
         pthread_mutex_unlock(&jobs_lock);
+        if (bg != low) plat_thread_background(low = bg);
         j->fn(j->arg);
         free(j);
     }
@@ -891,7 +898,7 @@ static void run_translate(void (*fn)(void *), void *arg) {
     pthread_mutex_unlock(&tjobs_lock);
 }
 
-static void run_job(void (*fn)(void *), void *arg) {
+static void run_job_in(void (*fn)(void *), void *arg, bool bg) {
     if (sync_shaders()) { fn(arg); return; }
     static bool started;
     if (!started) {
@@ -907,11 +914,13 @@ static void run_job(void (*fn)(void *), void *arg) {
     Job *j = malloc(sizeof *j);
     j->fn = fn; j->arg = arg; j->next = NULL;
     pthread_mutex_lock(&jobs_lock);
-    if (jobs_tail) jobs_tail->next = j; else jobs_head = j;
-    jobs_tail = j;
+    Job **head = bg ? &bg_head : &jobs_head, **tail = bg ? &bg_tail : &jobs_tail;
+    if (*tail) (*tail)->next = j; else *head = j;
+    *tail = j;
     pthread_cond_signal(&jobs_cond);
     pthread_mutex_unlock(&jobs_lock);
 }
+static void run_job(void (*fn)(void *), void *arg) { run_job_in(fn, arg, false); }
 
 // ================================================================== state
 typedef struct {
@@ -5336,7 +5345,7 @@ static void prep_job(void (*fn)(void *), void *arg) {
     PrepJob *j = malloc(sizeof *j);
     j->fn = fn, j->arg = arg;
     prep_pending++;
-    run_job(prep_job_run, j);
+    run_job_in(prep_job_run, j, true);
 }
 
 static _Atomic int prep_pipe_dups;  // records whose pipeline another record already made

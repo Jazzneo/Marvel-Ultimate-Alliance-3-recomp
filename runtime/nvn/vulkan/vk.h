@@ -42,6 +42,7 @@ typedef struct {
     PFN_vkCmdSetVertexInputEXT set_vertex_input;
     // LARECOMP_VK_GPL_PROBE=1 only (exec.c gpl_probe, measurement): VK_EXT_graphics_pipeline_library enabled
     bool gpl_probe;
+    bool present_wait;  // VK_KHR_present_id + VK_KHR_present_wait: when each frame reaches the screen (present_timing.c)
     bool map_placed, unmap_reserve;  // VK_EXT_map_memory_placed: driver memory mapped at a given address (exec.c guest_heap_dmabuf)
     bool ssbo_chunks;  // stores and atomics from fragment and vertex shaders (exec.c: the heap in chunks counts misses)
     bool lazy_heap, bda;  // the heap imported chunk by chunk (device.c lazy_heap_predicted), buffer device addresses enabled for it
@@ -123,6 +124,15 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads C
 VkFormat vk_format(uint32_t nvn_format);
 VkFormat vk_image_format(uint32_t nvn_format, VkImageAspectFlags *aspect);  // (shader preparation)
 void vk_pipeline_cache_save(void);
+// present_timing.c: frames on the screen timed (VK_KHR_present_wait)
+bool present_timing_wanted(void);
+void present_timing_init(void);
+uint64_t present_timing_next_id(void);
+void present_timing_queued(VkSwapchainKHR sc, uint64_t id, uint64_t target_ns);
+void present_timing_lateness(uint64_t *frames, uint64_t *late);
+void present_timing_cadence(uint64_t *frames, uint64_t *off);  // frames counted in refreshes, and those off the cadence  // frames taken, and taken well after their slot
+void present_timing_swapchain_lock(void);
+void present_timing_swapchain_unlock(void);
 bool vk_format_alpha_one(uint32_t nvn_format);
 // View of t (optionally through an NVN texture view) for rendering or sampling.
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype);

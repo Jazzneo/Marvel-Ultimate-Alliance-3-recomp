@@ -321,7 +321,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[16];
+    const char *ext[24];
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
@@ -338,6 +338,8 @@ static void create_device(void) {
     // pipeline-building features: logged below (issue #92); dynamic vertex input used, the library one only measured
     bool vids_ext = has_ext(ep, ne, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
 #ifdef VK_EXT_graphics_pipeline_library
+    bool pw_ext = present_timing_wanted() && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+                  has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
     bool gpl_ext = has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
                    has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
 #endif
@@ -375,6 +377,9 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
     if (gpl_ext) have_gpl.pNext = have.pNext, have.pNext = &have_gpl;
 #endif
+    VkPhysicalDevicePresentIdFeaturesKHR have_pid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR};
+    VkPhysicalDevicePresentWaitFeaturesKHR have_pw = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR};
+    if (pw_ext) have_pid.pNext = &have_pw, have_pw.pNext = have.pNext, have.pNext = &have_pid;
 #ifdef VK_EXT_extended_dynamic_state3
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT have_eds3 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
@@ -492,6 +497,17 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, .graphicsPipelineLibrary = VK_TRUE};
     if (g_vk.gpl_probe) en_gpl.pNext = f.pNext, f.pNext = &en_gpl;
 #endif
+    // frames on the screen timed (present_timing.c): the display pacing and the "[present]" cadence line
+    g_vk.present_wait = pw_ext && have_pid.presentId && have_pw.presentWait;
+    VkPhysicalDevicePresentIdFeaturesKHR en_pid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
+                                                   .presentId = VK_TRUE};
+    VkPhysicalDevicePresentWaitFeaturesKHR en_pw = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+                                                    .presentWait = VK_TRUE};
+    if (g_vk.present_wait) {
+        ext[n_ext++] = VK_KHR_PRESENT_ID_EXTENSION_NAME;
+        ext[n_ext++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
+        en_pid.pNext = &en_pw, en_pw.pNext = f.pNext, f.pNext = &en_pid;
+    }
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
@@ -521,6 +537,7 @@ static void create_device(void) {
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    if (g_vk.present_wait) present_timing_init();
     if (g_vk.vids) {
         g_vk.set_vertex_input = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetVertexInputEXT");
         if (!g_vk.set_vertex_input) g_vk.vids = false;
@@ -641,7 +658,11 @@ static void create_swapchain(void) {
     LOG("[vk] swapchain %ux%u, %u images, %s\n", ext.width, ext.height, count,
         ci.presentMode < 4 ? modes[ci.presentMode] : "other present mode");
     for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
-    if (old) vkDestroySwapchainKHR(g_vk.dev, old, NULL);
+    if (old) {
+        present_timing_swapchain_lock();  // (no wait for a frame on it then)
+        vkDestroySwapchainKHR(g_vk.dev, old, NULL);
+        present_timing_swapchain_unlock();
+    }
     g_vk.sc_format = sf.format;
     g_vk.sc_extent = ext;
     g_vk.sc_count = 8;
@@ -880,6 +901,11 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
+// The display pacing's slot for the present the game is making (objects.c present_pace, the game thread; 0: none),
+// carried with its frame to the recorder (vk_frame_end -> rec_QueuePresentKHR), which holds the present until then
+uint64_t g_present_target_ns;
+static uint64_t target_ring[64], cur_target;
+
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -894,7 +920,8 @@ void vk_frame_end(const char *shot_path) {
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
     // the present follows the submission in the recorder's order (its wait for the display is the recorder's, counted in
     // g_vk_frame_waits[2]; an out-of-date result makes the next vk_frame_begin recreate the swapchain)
-    rec_QueuePresentKHR(done_sem[img], g_vk.swapchain, img);
+    rec_QueuePresentKHR(done_sem[img], g_vk.swapchain, img, cur_target);
+    cur_target = 0;
     cur_frame.ok = false;
     if (shot_path) {
         vk_wait_seq(seq);
@@ -973,6 +1000,7 @@ static const char *pp_text(void) {
 // The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
 // frame: the number of this present (the game thread's frame when it was queued).
 void backend_present_now(NvnTexture *t, uint64_t frame) {
+    cur_target = __atomic_exchange_n(&target_ring[frame & 63], 0, __ATOMIC_ACQ_REL);  // (a repaint of it: none)
     if (pp_on < 0) pp_on = getenv("LARECOMP_VK_PROF") != NULL;
     if (pp_on) pp_t = SDL_GetTicksNS();
     TexBackend *b = vk_tex(t, true);
@@ -1178,6 +1206,8 @@ static void present_hooks(void) {
 void backend_present(NvnTexture *t) {
     g_last_presented = t;
     uint64_t frame = total_frames, t0 = plat_now_ns();
+    __atomic_store_n(&target_ring[frame & 63], g_present_target_ns, __ATOMIC_RELEASE);
+    g_present_target_ns = 0;
     if (rq_on()) rq_present(t, frame, true);
     else backend_present_now(t, frame);
     uint64_t t1 = plat_now_ns();
@@ -1309,6 +1339,8 @@ void ui_window_init(void) {
     window = SDL_CreateWindow("Marvel Ultimate Alliance 3 Recomp", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
+    // (the display pacing locks to the display the window is on: plat_display_vblank, Windows)
+    plat_display_window(SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL));
     // the window mode applies from the start (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) ui_apply_window_mode(window);
     create_instance();

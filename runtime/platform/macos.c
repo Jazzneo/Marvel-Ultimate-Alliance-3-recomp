@@ -118,6 +118,9 @@ void plat_sleep_until_ns(uint64_t t) {
     if (!tb.denom) mach_timebase_info(&tb);
     mach_wait_until(t * tb.denom / tb.numer);
 }
+bool plat_display_vblank(uint64_t *last_ns, uint64_t *period_ns) { (void)last_ns, (void)period_ns; return false; }
+void plat_display_window(void *native) { (void)native; }
+void plat_thread_background(bool on) { (void)on; }  // (not done on macOS yet)
 
 // Real-time (time-constraint) thread: exempt from the timer coalescing macOS applies to
 // ordinary threads when the app isn't frontmost, which otherwise stretches 16ms waits to ~100ms.

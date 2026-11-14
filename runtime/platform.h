@@ -46,6 +46,10 @@ int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
 // ---- time
 uint64_t plat_now_ns(void);                // monotonic
 void plat_sleep_until_ns(uint64_t t);      // precise wait for plat_now_ns() >= t
+// the display's latest vblank (plat_now_ns() time) and refresh period; false: not known (only Windows so far)
+bool plat_display_vblank(uint64_t *last_ns, uint64_t *period_ns);
+void plat_display_window(void *native);  // the game window (Windows: its HWND), whose display that is
+void plat_thread_background(bool on);  // the calling thread below the normal priority (background work), or back
 void plat_thread_realtime(uint64_t period_ns);  // periodic timing thread (vsync): don't coalesce its timers
 int plat_thread_realtime_check(uint64_t period_ns);  // (the calling thread, after a late wait) 0 the policy holds, 1 it was
                                                      // gone and is set again, -1 can't tell; only macOS looks

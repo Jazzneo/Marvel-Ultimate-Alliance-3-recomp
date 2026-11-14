@@ -9,7 +9,9 @@ shares the game's Koei Tecmo engine).
 
 **Status: early, work in progress.** The game boots and runs at its own 30 fps (60 and 120 as options) at 1920x1080
 through the title, the update history, save slot and difficulty selection, the opening movie and into the first level
-(the Kree ship), with the update's content and the Expansion Pass recognised. What has been changed, the debugging
+(the Kree ship), with the update's content and the Expansion Pass recognised. Frames are paced on the display's own
+refresh (no judder in play or in the movies), and the first start prepares the shaders of the title, the menus and the
+first level from your game files ("preparing shaders" in the window title). What has been changed, the debugging
 switches and the open work: [docs/CHANGES.md](docs/CHANGES.md).
 
 No game files are included or ever committed, and the releases hold no game code: the game code is recompiled from

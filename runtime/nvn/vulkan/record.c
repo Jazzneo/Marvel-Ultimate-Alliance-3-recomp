@@ -597,15 +597,25 @@ void rec_QueueSubmit2(const VkSubmitInfo2 *si, uint64_t seq) {
     ENQ_END();
 }
 
-typedef struct { VkSemaphore wait; VkSwapchainKHR swapchain; uint32_t image; } PresentArgs;
+typedef struct { VkSemaphore wait; VkSwapchainKHR swapchain; uint32_t image; uint64_t target; } PresentArgs;
 static void present_run(const void *p) {
     const PresentArgs *a = p;
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &a->wait,
                            .swapchainCount = 1, .pSwapchains = &a->swapchain, .pImageIndices = &a->image};
+    uint64_t pid = present_timing_next_id();  // (present_timing.c: when it reaches the screen)
+    VkPresentIdKHR pidi = {.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR, .swapchainCount = 1, .pPresentIds = &pid};
+    if (pid) pi.pNext = &pidi;
+    // held until its slot in the display's refresh (objects.c present_pace): every frame then reaches the compositor at
+    // the same point of a refresh, whenever its GPU work finished before that (no more than a frame's wait)
+    if (a->target) {
+        uint64_t now = plat_now_ns();
+        if (a->target > now && a->target - now < 50000000ull) plat_sleep_until_ns(a->target);
+    }
     uint64_t t0 = NOW();
     rq_watch("vkQueuePresentKHR", a->image);
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
     rq_watch(NULL, 0);
+    if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) present_timing_queued(a->swapchain, pid, a->target);
     uint64_t dt = NOW() - t0;
     __atomic_fetch_add(&g_vk_frame_waits[2], dt, __ATOMIC_RELAXED);
     if (dt > 250000000) {  // (FIFO waits for the display, a few ms; this long is a stall in the driver or the compositor)
@@ -626,8 +636,8 @@ static void present_run(const void *p) {
         pthread_mutex_unlock(&mu);
     }
 }
-void rec_QueuePresentKHR(VkSemaphore wait, VkSwapchainKHR swapchain, uint32_t image) {
-    PresentArgs a = {wait, swapchain, image};
+void rec_QueuePresentKHR(VkSemaphore wait, VkSwapchainKHR swapchain, uint32_t image, uint64_t target_ns) {
+    PresentArgs a = {wait, swapchain, image, target_ns};
     presents_queued++;
     if (on <= 0) {  // (the wait is this thread's: idle for the pacer, as before)
         uint64_t t0 = NOW();

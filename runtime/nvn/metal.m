@@ -1651,3 +1651,8 @@ int ui_run(void) {
         layer.drawableSize = CGSizeMake(w, h);
     }
 }
+
+// (runtime/nvn/objects.c, the display pacing) frames taken late against their slot: not measured on Metal yet
+uint64_t g_present_target_ns;
+void present_timing_lateness(uint64_t *frames, uint64_t *late) { *frames = *late = 0; }
+void present_timing_cadence(uint64_t *frames, uint64_t *off) { *frames = *off = 0; }
