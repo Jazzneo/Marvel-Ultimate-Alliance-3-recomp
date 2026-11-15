@@ -120,6 +120,13 @@ typedef struct TexBackend {
     VkFormat view_fmt[2];
     uint8_t nview_fmt;
     VkFormat storage_fmt;  // the format of its storage image views (SUST / SULD), VK_FORMAT_UNDEFINED: no storage usage
+    // (buffer textures as uniform texel buffers, textures.c vk_texel_view) its own device-local copy and view
+    VkBuffer tb_buf;
+    VmaAllocation tb_mem;
+    VkBufferView tb_view;
+    VkFormat tb_fmt;
+    uint64_t tb_size, tb_vsize, tb_frame, tb_cpu_frame, tb_hash;
+    bool tb_filled;
 } TexBackend;
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)

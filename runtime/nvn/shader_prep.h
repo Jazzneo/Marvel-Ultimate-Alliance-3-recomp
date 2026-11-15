@@ -44,6 +44,7 @@ typedef struct {
     uint8_t poly_fill;       // filled polygons (0: lines)
     uint32_t local[3];       // compute: local size
     uint32_t stencil;        // compute: texture slots sampled as stencil (ShaderKey.tex_stencil_mask; " st=", 0: none)
+    uint64_t tbuf[2];        // graphics: vertex, fragment slots holding buffer textures (ShaderKey.tex_buffer; " tb=", 0: none)
 } ShaderRec;
 
 // The record's text form (one line, no newline) and back

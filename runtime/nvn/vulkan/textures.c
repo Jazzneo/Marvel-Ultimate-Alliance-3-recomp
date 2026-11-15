@@ -285,7 +285,8 @@ void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags as
 }
 
 // Images destroyed by the guest are kept until the submissions that may use them have completed.
-typedef struct { VkImage img; VmaAllocation mem; VkImageView view; VkBuffer buf; VkDeviceMemory bmem; uint64_t seq; } Dead;
+typedef struct { VkImage img; VmaAllocation mem; VkImageView view; VkBuffer buf; VkDeviceMemory bmem; uint64_t seq;
+                 VkBufferView bview; VmaAllocation bvma; } Dead;  // (bview, bvma: texel buffers' views and VMA buffers)
 static Dead *dead;
 static int ndead, cap_dead;
 static void views_forget(TexBackend *b);
@@ -295,7 +296,9 @@ void vk_collect_dead(void) {
     int k = 0;
     for (int i = 0; i < ndead; i++) {
         if (dead[i].seq > done) { dead[k++] = dead[i]; continue; }
-        if (dead[i].view) vkDestroyImageView(g_vk.dev, dead[i].view, NULL);
+        if (dead[i].bview) vkDestroyBufferView(g_vk.dev, dead[i].bview, NULL);
+        else if (dead[i].view) vkDestroyImageView(g_vk.dev, dead[i].view, NULL);
+        else if (dead[i].bvma) vmaDestroyBuffer(g_vk.vma, dead[i].buf, dead[i].bvma);
         else if (dead[i].buf) { vkDestroyBuffer(g_vk.dev, dead[i].buf, NULL); vkFreeMemory(g_vk.dev, dead[i].bmem, NULL); }
         else vmaDestroyImage(g_vk.vma, dead[i].img, dead[i].mem);
     }
@@ -342,6 +345,7 @@ VkFormat vk_view_format(TexBackend *b, VkFormat want) {
     return b->format;
 }
 
+bool vk_texel_ok(NvnTexture *t);
 static void create_image(NvnTexture *t, TexBackend *b) {
     VkFmt mf = fmt_of(t->format);
     b->ax = b->scalable ? g_al_x : 1;
@@ -363,7 +367,12 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     case 4: case 6: layers = t->depth ? t->depth : 1; break;
     case 8: layers = 6; break;
     case 9: layers = t->depth ? t->depth : 6; break;
-    case 10: type = VK_IMAGE_TYPE_1D; th = 1; break;  // buffer texture: width texels (upload_buffer_texture)
+    case 10:  // buffer texture: width texels (upload_buffer_texture). Read as a texel buffer (vk_texel_view): this image
+              // only stands in while the shader taking it so builds, and no wider than a 1D image may be (the light
+              // lists: 2.1 million texels - validation's error, and AMD's limit is 16384)
+        type = VK_IMAGE_TYPE_1D; th = 1;
+        if (tw > g_vk.props.limits.maxImageDimension1D && vk_texel_ok(t)) tw = g_vk.props.limits.maxImageDimension1D;
+        break;
     default: break;
     }
     uint32_t levels = t->levels && t->target != 10 ? t->levels : 1;
@@ -544,9 +553,11 @@ static TexBackend *tex_backend(NvnTexture *t) {
     return b;
 }
 
+static void texel_free(TexBackend *b);
 void backend_texture_destroyed(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
+        texel_free(b);
         extern void vk_alias_texture_destroyed(NvnTexture *t);  // (exec.c copy aliases: a source's contents handed over)
         vk_alias_texture_destroyed(t);
         live_remove(b);
@@ -651,6 +662,154 @@ static void upload_buffer_texture(NvnTexture *t, TexBackend *b) {
     memcpy(s.ptr, mem, total);
     VkBufferImageCopy rg = {.bufferOffset = s.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, 1, 1}};
     rec_CmdCopyBufferToImage(vk_upload_cmd(), s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+}
+
+// ---- Buffer textures as uniform texel buffers (shaders that take them so: ShaderKey.tex_buffer, exec.c texel_info).
+// As 1D images (above) the light lists' 8.4 and 4.2 MB were images 2.1 and 1.05 million texels wide - Vulkan
+// guarantees 4096, NVIDIA allows 32768 and AMD 16384 - each copied in full every frame: 0.47 + 0.24 ms of an RTX 3060's
+// frame, from device-local memory as from the heap (the copy into the image is the cost). As texel buffers: a view of
+// the compute output mirror that holds the range (exec.c vk_mirror_live: no copy at all - the draw reads what the light
+// culling just wrote, as on the console), else the texture's own device-local buffer, refreshed once a frame as the
+// image was (a GPU copy from the imported heap, or the CPU's bytes when they changed). LARECOMP_VK_TEXEL_BUFFERS=0: 1D images.
+uint64_t prof_texel_mirror, prof_texel_own;
+extern uint32_t vk_view_gen;  // (below: bumped when a view may be destroyed)
+static struct { VkBuffer buf; VkDeviceSize off, size; VkFormat fmt; VkBufferView view; } mview[32];
+static int nmview, mview_next;
+
+static VkBufferView make_texel_view(VkBuffer buf, VkDeviceSize off, VkDeviceSize size, VkFormat fmt) {
+    VkBufferViewCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = buf, .format = fmt, .offset = off, .range = size};
+    VkBufferView v = VK_NULL_HANDLE;
+    if (vkCreateBufferView(g_vk.dev, &ci, NULL, &v) != VK_SUCCESS) {
+        static int nlog;
+        if (nlog++ < 10) LOG("[vk] texel buffer view (format %d, %llu bytes) failed\n", fmt, (unsigned long long)size);
+        return VK_NULL_HANDLE;
+    }
+    return v;
+}
+
+// (exec.c gm_reset: the mirrors are destroyed - the GPU idle - and these views of them with them)
+void vk_texel_views_reset(void) {
+    for (int i = 0; i < nmview; i++) if (mview[i].view) vkDestroyBufferView(g_vk.dev, mview[i].view, NULL);
+    memset(mview, 0, sizeof mview);
+    nmview = mview_next = 0;
+    vk_view_gen++;
+}
+
+static VkBufferView mirror_view(VkBuffer buf, VkDeviceSize off, VkDeviceSize size, VkFormat fmt) {
+    for (int i = 0; i < nmview; i++)
+        if (mview[i].buf == buf && mview[i].off == off && mview[i].size == size && mview[i].fmt == fmt) return mview[i].view;
+    VkBufferView v = make_texel_view(buf, off, size, fmt);
+    if (!v) return VK_NULL_HANDLE;
+    int i = nmview < 32 ? nmview++ : mview_next++ % 32;
+    if (mview[i].view) { defer((Dead){.bview = mview[i].view}); vk_view_gen++; }
+    mview[i].buf = buf, mview[i].off = off, mview[i].size = size, mview[i].fmt = fmt, mview[i].view = v;
+    return v;
+}
+
+static void texel_free(TexBackend *b) {
+    if (b->tb_view) { defer((Dead){.bview = b->tb_view}); vk_view_gen++; }
+    if (b->tb_buf) defer((Dead){.buf = b->tb_buf, .bvma = b->tb_mem});
+    b->tb_view = VK_NULL_HANDLE, b->tb_buf = VK_NULL_HANDLE, b->tb_mem = VK_NULL_HANDLE;
+    b->tb_size = b->tb_vsize = 0, b->tb_filled = false;
+}
+
+// A texture this path takes: a buffer texture whose format the GPU reads from texel buffers.
+bool vk_texel_ok(NvnTexture *t) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_VK_TEXEL_BUFFERS") || atoi(getenv("LARECOMP_VK_TEXEL_BUFFERS")) != 0;
+    if (!on || !t || t->target != 10 || !t->addr || !t->width) return false;
+    const FormatInfo *fi = t->layout.fmt;
+    VkFmt mf = fmt_of(t->format);
+    if (!fi || !fi->bpb || fi->bpb == 3 || mf.expand_rgb || !mf.vf || t->width > g_vk.props.limits.maxTexelBufferElements) return false;
+    static struct { VkFormat f; bool ok; } known[32];
+    static int nknown;
+    for (int i = 0; i < nknown; i++) if (known[i].f == mf.vf) return known[i].ok;
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(g_vk.phys, mf.vf, &fp);
+    bool ok = (fp.bufferFeatures & VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT) != 0;
+    if (nknown < 32) known[nknown].f = mf.vf, known[nknown++].ok = ok;
+    if (!ok) LOG("[vk] buffer texture format %d: no texel buffer reads here (a 1D image instead)\n", mf.vf);
+    return ok;
+}
+
+// kind: 1 float, 2 unsigned, 3 signed (the shader's samplerBuffer): a zero buffer's view, for a slot with nothing usable
+VkBufferView vk_dummy_texel_view(int kind) {
+    static VkBuffer buf;
+    static VmaAllocation mem;
+    static VkBufferView v[4];
+    if (kind < 1 || kind > 3) kind = 1;
+    if (!buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 256,
+                                 .usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &buf, &mem, NULL) != VK_SUCCESS) return VK_NULL_HANDLE;
+        VkSpan z = vk_transient_upload(256, 16);
+        memset(z.ptr, 0, 256);
+        VkBufferCopy c = {z.off, 0, 256};
+        rec_CmdCopyBuffer(vk_upload_cmd(), z.buf, buf, 1, &c);
+    }
+    if (!v[kind]) {
+        static const VkFormat f[4] = {VK_FORMAT_UNDEFINED, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SINT};
+        v[kind] = make_texel_view(buf, 0, 256, f[kind]);
+    }
+    return v[kind];
+}
+
+VkBufferView vk_texel_view(NvnTexture *t) {
+    if (!vk_texel_ok(t)) return VK_NULL_HANDLE;
+    TexBackend *b = tex_backend(t);
+    const FormatInfo *fi = t->layout.fmt;
+    VkFormat vf = fmt_of(t->format).vf;
+    uint64_t total = (uint64_t)t->width * fi->bpb, frame = vk_frame_counter();
+    extern bool vk_mirror_live(uint64_t addr, uint64_t size, bool cpu, VkBuffer *buf, VkDeviceSize *off);
+    VkBuffer mb;
+    VkDeviceSize mo;
+    bool cpu = b->tb_cpu_frame != frame;  // (the CPU's writes: looked at once a frame)
+    if (vk_mirror_live(t->addr, total, cpu, &mb, &mo) && mo % g_vk.props.limits.minTexelBufferOffsetAlignment == 0) {
+        if (cpu) b->tb_cpu_frame = frame;
+        VkBufferView v = mirror_view(mb, mo, total, vf);
+        if (v) { prof_texel_mirror++; return v; }
+    }
+    if (!b->tb_buf || b->tb_size < total) {
+        texel_free(b);
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = total,
+                                 .usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &b->tb_buf, &b->tb_mem, NULL) != VK_SUCCESS) {
+            b->tb_buf = VK_NULL_HANDLE, b->tb_mem = VK_NULL_HANDLE;
+            return VK_NULL_HANDLE;
+        }
+        b->tb_size = total;
+    }
+    if (!b->tb_view || b->tb_fmt != vf || b->tb_vsize != total) {
+        if (b->tb_view) { defer((Dead){.bview = b->tb_view}); vk_view_gen++; }
+        b->tb_view = make_texel_view(b->tb_buf, 0, total, vf);
+        b->tb_fmt = vf, b->tb_vsize = total;
+        if (!b->tb_view) return VK_NULL_HANDLE;
+    }
+    if (b->tb_frame != frame || !b->tb_filled) {  // (in the upload buffer: before this submission's draws, as the image)
+        b->tb_frame = frame;
+        extern bool vk_guest_buffer(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off);
+        VkBuffer gb;
+        VkDeviceSize go;
+        if (vk_guest_buffer(t->addr, total, &gb, &go)) {
+            VkBufferCopy c = {go, 0, total};
+            rec_CmdCopyBuffer(vk_upload_cmd(), gb, b->tb_buf, 1, &c);
+        } else {
+            const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
+            uint64_t h = hash_full(mem, total);
+            if (!b->tb_filled || h != b->tb_hash) {
+                b->tb_hash = h;
+                VkSpan s = vk_transient_upload(total, 16);
+                memcpy(s.ptr, mem, total);
+                VkBufferCopy c = {s.off, 0, total};
+                rec_CmdCopyBuffer(vk_upload_cmd(), s.buf, b->tb_buf, 1, &c);
+            }
+        }
+        b->tb_filled = true;
+    }
+    prof_texel_own++;
+    return b->tb_view;
 }
 
 static void upload_texture(NvnTexture *t, TexBackend *b) {

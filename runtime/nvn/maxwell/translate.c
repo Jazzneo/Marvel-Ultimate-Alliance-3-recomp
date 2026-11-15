@@ -2355,6 +2355,72 @@ static void glsl_wrap_stencil(Ctx *c, Str *body) {
     *body = o;
 }
 
+// A texture function's call at p (its name, then "(t<slot>"): the slot, or -1; *end: past the name
+static int tex_call_slot(const char *p, const char **end) {
+    const char *e = p;
+    while (id_char(*e)) e++;
+    *end = e;
+    return e[0] == '(' && e[1] == 't' && e[2] >= '0' && e[2] <= '9' ? atoi(e + 2) : -1;
+}
+
+// Buffer texture slots (ShaderKey.tex_buffer): a 1D slot whose every lookup is a texelFetch becomes TEXTYPE_BUFFER
+// (samplerBuffer), its fetches lose the level argument (texelFetch(t, x, l) -> texelFetch(t, x)), and an integer
+// one's are wrapped to the float whose bits are the value (as the stencil slots). A slot looked up another way stays 1D.
+static void glsl_buffer_slots(Ctx *c, Str *body) {
+    const ShaderKey *key = c->key;
+    if (!key || !key->tex_buffer || !body->buf) return;
+    bool cand[64] = {0}, any = false;
+    for (int i = 0; i < c->info->ntex && i < 64; i++) {
+        ShaderTexture *t = &c->info->tex[i];
+        int k = ((int)t->handle_offset - 0x20) / 8;
+        if (t->is_image || t->bindless || t->shadow || t->stencil || t->type != TEXTYPE_1D || k < 0 || k >= 32) continue;
+        cand[i] = ((key->tex_buffer >> (2 * k)) & 3) != 0;
+    }
+    for (const char *p = body->buf; *p; p++) {  // (a slot looked up other than by texelFetch: not a buffer)
+        if (!(p == body->buf || !id_char(p[-1])) || (strncmp(p, "texture", 7) && strncmp(p, "texelFetch", 10))) continue;
+        const char *e;
+        int slot = tex_call_slot(p, &e);
+        if (slot >= 0 && slot < 64 && (e - p != 10 || strncmp(p, "texelFetch", 10))) cand[slot] = false;
+        p = e - 1;
+    }
+    for (int i = 0; i < c->info->ntex && i < 64; i++) {
+        if (!cand[i]) continue;
+        ShaderTexture *t = &c->info->tex[i];
+        t->type = TEXTYPE_BUFFER;
+        t->buffer_kind = (uint8_t)((key->tex_buffer >> (2 * (((int)t->handle_offset - 0x20) / 8))) & 3);
+        any = true;
+    }
+    if (!any) return;
+    Str o = {0};
+    const char *p = body->buf;
+    while (*p) {
+        bool start = (p == body->buf || !id_char(p[-1])) && !strncmp(p, "texelFetch(", 11);
+        const char *e;
+        int slot = start ? tex_call_slot(p, &e) : -1;
+        if (slot < 0 || slot >= 64 || !cand[slot]) {
+            if (start) { sp(&o, "%.*s", (int)(e - p), p); p = e; continue; }
+            sp(&o, "%c", *p);
+            p++;
+            continue;
+        }
+        const char *q = e, *last = NULL;  // (the call's end; its last top-level comma)
+        int depth = 0;
+        do {
+            if (*q == '(') depth++;
+            else if (*q == ')') depth--;
+            else if (*q == ',' && depth == 1) last = q;
+            q++;
+        } while (*q && depth > 0);
+        int kind = c->info->tex[slot].buffer_kind;
+        const char *wrap = kind == 2 ? "uintBitsToFloat(" : kind == 3 ? "intBitsToFloat(" : "";
+        if (last) sp(&o, "%s%.*s)%s", wrap, (int)(last - p), p, *wrap ? ")" : "");
+        else sp(&o, "%s%.*s%s", wrap, (int)(q - p), p, *wrap ? ")" : "");
+        p = q;
+    }
+    free(body->buf);
+    *body = o;
+}
+
 // (GLSL fragment, lazy heap chunks) Early depth / stencil tests for a shader that counts chunk misses (GMiss atomics):
 // only where the tests' outcome can't depend on the shader - no discard, no depth output (a sample mask output
 // isn't translated) - and the shader has no side effect of its own (stores), so whether a hidden fragment runs it is
@@ -2381,6 +2447,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         t->stencil = true;
     }
     glsl_wrap_stencil(c, &body);
+    glsl_buffer_slots(c, &body);
     if (info->uses_gmem && (info->cbuf_mask & (1u << GMEM_BUFFER_INDEX))) fail(c, "cbuf %d clashes with gmem", GMEM_BUFFER_INDEX);
     if (info->cbuf_mask >> 18) fail(c, "cbuf index out of range");
     for (int i = 0; i < info->ntex; i++)
@@ -2529,6 +2596,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             default: sp(&s, "ivec3 tsize%d(int l) { return ivec3(imageSize(t%d), 1); }\n", i, i);
             }
             sp(&s, "int tlevels%d() { return 1; }\n", i);
+            continue;
+        }
+        if (t->type == TEXTYPE_BUFFER) {  // (ShaderKey.tex_buffer: a uniform texel buffer)
+            sp(&s, "layout(set = %d, binding = %d) uniform %ssamplerBuffer t%d;\n", set, 32 + i,
+               t->buffer_kind == 2 ? "u" : t->buffer_kind == 3 ? "i" : "", i);
+            sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d), 1, 1); }\nint tlevels%d() { return 1; }\n", i, i, i);
             continue;
         }
         sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);

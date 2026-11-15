@@ -1779,6 +1779,8 @@ typedef struct {
     struct PipeMemo *pmemo;     // (render thread) draw_'s pipeline key memo for this program
     bool reuse;                 // set reuse (stage_set): some uniform buffers are dynamic, sets are kept while their contents repeat
     struct SetCache *scache[2]; // (render thread) stage_set's last set per set index
+    uint32_t tb_cand[2];        // (render thread, texel_slots) vertex / fragment slots k sampled as 1D: may hold a buffer texture
+    bool tb_done;
 } Prog;
 
 // ---- descriptor set reuse (graphics programs; port of vk-draw-cpu-2 d50bbce)
@@ -1986,6 +1988,7 @@ static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey
     b = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (fkey->tex_buffer) for (int i = 0; i < 8; i++) { h ^= (fkey->tex_buffer >> (8 * i)) & 0xFF; h *= 0x100000001B3ull; }
     return h;
 }
 
@@ -2078,10 +2081,11 @@ static NvnProgram *bound_program(NvnProgram *prog, uint32_t stages) {
 
 static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey);
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
-    static struct { uint64_t code[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
+    static struct { uint64_t code[2]; ShaderKey vkey; uint8_t rt[8]; uint64_t ftb; uint32_t gen; Prog *prog; } m;
     bool on = key_memo_on();
     if (on && m.prog && m.gen == key_gen && (np->stage_mask & 3) == 3 && m.code[0] == np->stages[0].code_addr &&
-        m.code[1] == np->stages[1].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8)) {
+        m.code[1] == np->stages[1].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8) &&
+        m.ftb == fkey->tex_buffer) {
         prof_prog_memo++;
         prog_fp_check(m.prog, np);  // (as a table hit)
         return m.prog;
@@ -2089,7 +2093,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     Prog *p = get_program_(np, vkey, fkey);
     if (on && p) {
         m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr;
-        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.gen = key_gen; m.prog = p;
+        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.ftb = fkey->tex_buffer; m.gen = key_gen; m.prog = p;
     }
     return p;
 }
@@ -2118,6 +2122,7 @@ static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    if (fkey->tex_buffer) for (int i = 0; i < 8; i++) { h ^= (fkey->tex_buffer >> (8 * i)) & 0xFF; h *= 0x100000001B3ull; }
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
@@ -4550,7 +4555,26 @@ static void gm_invalidate(uint64_t lo, uint64_t hi) {
     for (int i = 0; i < GM_N; i++)
         if (gm[i].buf && !gm[i].keep && gm[i].lo < hi && lo < gm[i].hi) gm[i].valid = gm[i].sampled = false;
 }
+// A draw reading [addr, addr + size) as a texel buffer (textures.c vk_texel_view): the mirror holding it as the heap
+// does at this point of the GPU's work - one made whole by its last dispatch (valid) and not written since by other GPU
+// work (gm_invalidate) - or false. cpu: also no CPU write over it since that dispatch's look (the OS's page write
+// tracking: a call to it; the texture path asks once a frame).
+bool vk_mirror_live(uint64_t addr, uint64_t size, bool cpu, VkBuffer *buf, VkDeviceSize *off) {
+    if (!size || addr < HEAP_BASE || !gm_on()) return false;
+    uint64_t o = addr - HEAP_BASE;
+    for (int k = 0; k < GM_N; k++) {
+        GfMirror *g = &gm[k];
+        if (!g->buf || !g->valid || o < g->lo || o + size > g->hi) continue;
+        uint32_t now;
+        if (cpu && pages_cpu_written(addr, size, g->gen, &now) != 0) return false;
+        *buf = g->buf, *off = o - g->lo;
+        return true;
+    }
+    return false;
+}
 static void gm_reset(void) {  // (a reboot, the GPU idle: the heap holds something else)
+    extern void vk_texel_views_reset(void);
+    vk_texel_views_reset();
     for (int i = 0; i < GM_N; i++) {
         if (gm[i].buf) vmaDestroyBuffer(g_vk.vma, gm[i].buf, gm[i].mem);
         memset(&gm[i], 0, sizeof gm[i]);
@@ -4681,7 +4705,8 @@ static void gfast_prepare(VkCommandBuffer cb) {
         if (w < 0) continue;
         if (k < 0 && fresh >= 0) {  // (a new mirror: its buffer now, its contents after the dispatch)
             VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = r[i].hi - r[i].lo,
-                                     .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+                                     .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                              VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT};  // (textures.c vk_texel_view)
             VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
             if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &gm[fresh].buf, &gm[fresh].mem, NULL) == VK_SUCCESS) {
                 k = fresh;
@@ -4698,8 +4723,12 @@ static void gfast_prepare(VkCommandBuffer cb) {
         static int log = -1, n;
         if (log < 0) log = getenv("LARECOMP_LOG_GFAST_MIRROR") != NULL;
         if (log && st_cs_stores && ++n % 1000 == 0)
-            LOG("[gfast] mirrors: %llu ranges served, %llu MB not read across the bus\n", (unsigned long long)prof_gm_hits,
-                (unsigned long long)(prof_gm_bytes >> 20));
+        {
+            extern uint64_t prof_texel_mirror, prof_texel_own;
+            LOG("[gfast] mirrors: %llu ranges served, %llu MB not read across the bus; texel buffer binds %llu of a mirror, "
+                "%llu of their own copy\n", (unsigned long long)prof_gm_hits, (unsigned long long)(prof_gm_bytes >> 20),
+                (unsigned long long)prof_texel_mirror, (unsigned long long)prof_texel_own);
+        }
     }
     vk_full_barrier(cb);
     gmap_tab[GMAP_MAX * 4] = (uint32_t)m;
@@ -5125,6 +5154,11 @@ static void image_info(int stage, ShaderTexture *st_, VkDescriptorImageInfo *out
 
 static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo *out, float sc[2], uint32_t wh[2], float fr[2]) {
     ShaderTexture *st_ = &si->tex[i];
+    if (st_->type == TEXTYPE_BUFFER) {  // (a uniform texel buffer: texel_info)
+        *out = (VkDescriptorImageInfo){VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL};
+        sc[0] = sc[1] = 1; wh[0] = wh[1] = 0; fr[0] = fr[1] = 1;
+        return;
+    }
     if (st_->is_image) {
         image_info(stage, st_, out);
         sc[0] = sc[1] = 1; wh[0] = wh[1] = 0; fr[0] = fr[1] = 1;
@@ -5187,6 +5221,23 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
 }
 
+// Buffer textures as uniform texel buffers (textures.c vk_texel_view; ShaderKey.tex_buffer): the kind of samplerBuffer
+// a texture takes (1 float, 2 unsigned, 3 signed), 0: not one this path takes
+static int texel_kind(NvnTexture *t) {
+    extern bool vk_texel_ok(NvnTexture *t);
+    if (!vk_texel_ok(t)) return 0;
+    int k = rt_kind(t->format);
+    return k == 2 ? 2 : k == 1 ? 3 : 1;
+}
+static VkBufferView texel_info(int stage, ShaderInfo *si, int i) {
+    extern VkBufferView vk_texel_view(NvnTexture *t), vk_dummy_texel_view(int kind);
+    ShaderTexture *st_ = &si->tex[i];
+    NvnTexture *t = shader_texture_object(stage, st_);
+    if (t && naliases) t = alias_read(t);
+    VkBufferView v = t && texel_kind(t) == st_->buffer_kind ? vk_texel_view(t) : VK_NULL_HANDLE;
+    return v ? v : vk_dummy_texel_view(st_->buffer_kind);
+}
+
 // Writes the descriptor set of one stage. gx..gz: compute group counts (driver constants).
 // pre_ii: texture descriptors already resolved by the caller (draw: fragment textures, needed earlier for the
 // viewport decision), or NULL.
@@ -5204,6 +5255,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
+    VkBufferView tv[MAX_BIND];
     uint32_t dbind[MAX_BIND], doff[MAX_BIND];
     int n = 0, nd = 0;
     int sg = stage == 1 ? 1 : 0;
@@ -5234,6 +5286,15 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 tex_fr[sg][ti][0] = fr[0]; tex_fr[sg][ti][1] = fr[1];
             }
             w[n].pImageInfo = &ii[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER && b->binding >= 32) {
+            int ti = (int)b->binding - 32;
+            tv[n] = ti < si->ntex ? texel_info(stage, si, ti) : VK_NULL_HANDLE;
+            if (!tv[n]) continue;  // (no zero buffer either: the set leaves it unwritten)
+            if (ti < 64) {
+                tex_sc[sg][ti][0] = tex_sc[sg][ti][1] = 1; tex_wh[sg][ti][0] = tex_wh[sg][ti][1] = 0;
+                tex_fr[sg][ti][0] = tex_fr[sg][ti][1] = 1;
+            }
+            w[n].pTexelBufferView = &tv[n];
         } else if (is_ubo(b->type) && b->binding < 17) {
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
             w[n].pBufferInfo = &bi[n];
@@ -5291,6 +5352,8 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             e[i].type = (uint32_t)w[i].descriptorType;
             if (w[i].pImageInfo) {
                 e[i].a = (uint64_t)(uintptr_t)ii[i].sampler; e[i].b = (uint64_t)(uintptr_t)ii[i].imageView; e[i].c = (uint64_t)ii[i].imageLayout;
+            } else if (w[i].pTexelBufferView) {
+                e[i].a = (uint64_t)(uintptr_t)tv[i];
             } else {
                 e[i].a = (uint64_t)(uintptr_t)bi[i].buffer; e[i].b = bi[i].offset; e[i].c = bi[i].range;
             }
@@ -5533,6 +5596,7 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
     vkey.flip_x = fkey.flip_x = (r->flags & SR_FLIP_X) != 0;
     for (int i = 0; i < r->nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(r->attrib[i] & 0xFF);
     for (int i = 0; i < r->ncolor && i < 8; i++) if (r->color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(r->color[i]);
+    vkey.tex_buffer = r->tbuf[0], fkey.tex_buffer = r->tbuf[1];
     uint64_t ck = prog_content_key(r->vs, r->fs, &vkey, &fkey);
     Prog *p = PREP_GET(prep_progs, ck);
     if (!p) {
@@ -5766,9 +5830,11 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
 }
 
 // The draw's state as a variant record (shader_prep.h; as renderer.m: both backends record the same lines)
+static uint64_t draw_tb[2];  // (draw_) the program's buffer texture slots (ShaderKey.tex_buffer), for the records
 static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
     memset(r, 0, sizeof *r);
     r->kind = 'G';
+    r->tbuf[0] = draw_tb[0], r->tbuf[1] = draw_tb[1];
     r->vs = shader_stage_hash(&st.program->stages[0]);
     r->fs = shader_stage_hash(&st.program->stages[1]);
     r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0);
@@ -5994,6 +6060,35 @@ static bool gs_cull_replay(CmdRec *r, bool indexed) {
     return true;
 }
 
+// The program's 1D slots that hold a buffer texture this draw (ShaderKey.tex_buffer, 2 bits a slot): vertex tb[0],
+// fragment tb[1]. false: none (the program as it is).
+static bool texel_slots(Prog *pr, uint64_t tb[2]) {
+    tb[0] = tb[1] = 0;
+    if (!st.tpool) return false;
+    if (!pr->tb_done) {
+        for (int s = 0; s < 2; s++) {
+            ShaderInfo *si = s ? pr->fi : pr->vi;
+            for (int i = 0; si && i < si->ntex; i++) {
+                ShaderTexture *t = &si->tex[i];
+                int k = ((int)t->handle_offset - 0x20) / 8;
+                if (!t->is_image && !t->bindless && !t->shadow && !t->stencil && t->type == TEXTYPE_1D && k >= 0 && k < 32)
+                    pr->tb_cand[s] |= 1u << k;
+            }
+        }
+        pr->tb_done = true;
+    }
+    for (int s = 0; s < 2; s++)
+        for (uint32_t m = pr->tb_cand[s]; m; m &= m - 1) {
+            int k = __builtin_ctz(m);
+            uint64_t h = st.tex[s][k];
+            uint32_t tic = h & 0xFFFFF;
+            if (!h || tic >= (uint32_t)st.tpool->count) continue;
+            NvnTexture *t = ((NvnTexEntry *)st.tpool->entries)[tic].tex;
+            if (t && t->target == 10) tb[s] |= (uint64_t)texel_kind(t) << (2 * k);
+        }
+    return tb[0] || tb[1];
+}
+
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
@@ -6024,6 +6119,16 @@ static void draw_(CmdRec *r, bool indexed) {
             pr = get_program(st.program, &vkey, &fkey);
             if (!pr || atomic_load(&pr->state) != 1) { SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
             g_mirror_w = (float)st.rt.color[0]->width;
+        }
+    }
+    draw_tb[0] = draw_tb[1] = 0;
+    {   // buffer textures in 1D slots: the program's variant taking them as texel buffers (while it builds: this one, as 1D images)
+        uint64_t tb[2];
+        if (texel_slots(pr, tb)) {
+            ShaderKey v2 = vkey, f2 = fkey;
+            v2.tex_buffer = tb[0], f2.tex_buffer = tb[1];
+            Prog *p2 = get_program(st.program, &v2, &f2);
+            if (p2 && atomic_load(&p2->state) == 1) { pr = p2; draw_tb[0] = tb[0], draw_tb[1] = tb[1]; }
         }
     }
     snap_apply(0, pr->vi->ssbo_read);  // (overlap) the storage slots the shaders read: a copy where the CPU rewrites the range

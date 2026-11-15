@@ -48,6 +48,10 @@ typedef struct {
     uint8_t glsl;           // emit Vulkan GLSL (see the contract above) instead of MSL
     uint32_t tex_stencil_mask;  // (GLSL) bound texture slots k (handle at 0x20 + 8 * k) sampled as stencil: a usampler
                                 // whose raw value lands in the registers (ShaderTexture.stencil). Compute only so far.
+    uint64_t tex_buffer;        // (GLSL) bound texture slots k that hold a buffer texture (target 10), 2 bits each at 2 * k:
+                                // 1 float, 2 unsigned, 3 signed format. A 1D slot only fetched (TLD) becomes a
+                                // samplerBuffer (ShaderTexture.type TEXTYPE_BUFFER): a uniform texel buffer, not a 1D image
+                                // as wide as the buffer. Integer ones: u/isamplerBuffer, the bits as floats (as stencil).
 } ShaderKey;
 
 typedef struct {
@@ -56,6 +60,7 @@ typedef struct {
     bool shadow, is_array, is_image, bindless;
     bool image_write;        // is_image: stored to (SUST)
     bool stencil;            // sampled as stencil (ShaderKey.tex_stencil_mask): bind a stencil-aspect view
+    uint8_t buffer_kind;     // TEXTYPE_BUFFER (ShaderKey.tex_buffer): 1 float, 2 unsigned, 3 signed
     uint32_t bindless_cbuf, bindless_offset;
 } ShaderTexture;
 

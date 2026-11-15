@@ -89,6 +89,7 @@ void shader_rec_format(const ShaderRec *r, char *out, size_t n) {
         for (int k = 0; k < 8; k++) PUT("%02x", r->blend[i][k]);
     }
     PUT(" k=%u t=%u p=%u", r->a2c, r->topo, r->poly_fill);
+    if (r->tbuf[0] || r->tbuf[1]) PUT(" tb=%" PRIx64 ",%" PRIx64, r->tbuf[0], r->tbuf[1]);
 #undef PUT
 }
 
@@ -176,6 +177,11 @@ bool shader_rec_parse(const char *line, ShaderRec *r) {
     if ((v = field(line, "k"))) r->a2c = (uint8_t)strtoul(v, NULL, 16);
     r->topo = (v = field(line, "t")) ? (uint8_t)strtoul(v, NULL, 16) : 2;
     r->poly_fill = (v = field(line, "p")) ? (uint8_t)strtoul(v, NULL, 16) : 1;
+    if ((v = field(line, "tb"))) {
+        char *e;
+        r->tbuf[0] = strtoull(v, &e, 16);
+        if (*e == ',') r->tbuf[1] = strtoull(e + 1, NULL, 16);
+    }
     return r->vs && r->fs;
 }
 

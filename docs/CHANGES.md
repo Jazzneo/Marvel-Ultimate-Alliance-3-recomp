@@ -183,7 +183,8 @@ Added in this project:
 | `LARECOMP_MOVIE_PROBE=1` | every movie's streams probed (`avformat_find_stream_info`), as in 0.1.1 |
 | `LARECOMP_LOG_VKMEM=1` | each block of device memory allocated or freed, with the game's frame |
 | `LARECOMP_VK_GFAST_MIRROR=0` | no device-local mirrors of compute output ranges (every copy-in from the heap) |
-| `LARECOMP_LOG_GFAST_MIRROR=1` | ranges served from a mirror so far, every 1000 storing dispatches |
+| `LARECOMP_LOG_GFAST_MIRROR=1` | ranges served from a mirror so far, and texel buffer binds (of a mirror / their own copy), every 1000 storing dispatches |
+| `LARECOMP_VK_TEXEL_BUFFERS=0` | buffer textures as 1D images copied every frame, as in 0.1.1 (no `samplerBuffer` variants) |
 
 Inherited from LAS Recomp and used here:
 
@@ -585,7 +586,7 @@ Expansion Pass.
   late frames, at the level's own loading as the movie ends), where it had shown up to 24. The full route at 30 and
   60 fps: 10 and 12 frames off the cadence in 5.5 minutes (25 and 22 the round before), game time 4.00 s in 4.00 s.
 
-## After 0.1.1: movie starts, light culling copies, the level's first frames, test routes (2026-11-14)
+## After 0.1.1: movie starts, light culling copies, the light lists as texel buffers, the level's first frames, test routes (2026-11-14)
 
 - **A movie's start** (`runtime/hle/movie.c` `header_complete`): the game's main thread opens the movie and both
   decoders as it starts (`LARECOMP_LOG_MOVIE_OPEN`: all on the main thread, t80). `avformat_find_stream_info` decoded
@@ -610,6 +611,21 @@ Expansion Pass.
   frame in the first level (RTX 3060; `LARECOMP_GPUPROF_AT`, now with each dispatch's copy-in, run and copy-back);
   8 minutes of play (`route.sh play`): 25,000 ranges from a mirror, the lighting as before, no crash. Left there:
   the copies back (0.4-0.6 ms each) and a dozen small dispatches of ~0.1 ms each, the shaders' own time.
+- **The light lists as texel buffers** (`runtime/nvn/vulkan/textures.c` `vk_texel_view`, `exec.c` `texel_slots`,
+  `maxwell/translate.c` `glsl_buffer_slots`): the lighting pass reads the tile lists as buffer textures, which were 1D
+  images as wide as the buffer - 2.1 and 1.05 million texels, where Vulkan guarantees 4096 (NVIDIA allows 32768, AMD
+  16384; validation's error) - and each was copied whole into its image every frame: 0.47 + 0.24 ms of the GPU's frame,
+  as slow from the device-local mirror as from the heap (the copy into the image is the cost). A draw whose 1D slot holds
+  a buffer texture now takes its program's variant with that slot a `samplerBuffer` (`ShaderKey.tex_buffer`, two bits
+  a slot: float, unsigned or signed format; integer ones read as `u`/`isamplerBuffer`, the bits handed on as floats as
+  before) and binds a uniform texel buffer: a view of the light culling's mirror when it holds the range as the heap
+  does (`vk_mirror_live`: no copy at all), else the texture's own device-local buffer refreshed once a frame as the
+  image was. The variant builds in the background on first sight (the 1D images meanwhile, now no wider than the GPU's
+  limit) and is recorded for the start's preparation (` tb=` in `cache/shader_seen.txt`). The descriptor recorder,
+  the reflection and the pools know texel buffers. In one 400 s play run alternating every 180 frames: GPU frame span
+  12.43 -> 11.94 ms (RTX 3060, 1080p: the uploads before a submission 1.13 -> 0.42 ms, the main work 10.95 -> 11.16).
+  8 minutes of play (`route.sh play`): 85,000 binds of a mirror, the lighting as before, no crash; validation: no
+  error from these.
 - **Test routes** (`tools/route.sh`): a failed move of `save/` aside (a file still held right after the run before)
   let a route play on the player's own save and then remove it. The move is now retried, the route doesn't run without
   it, and `save/` is only removed when the player's copy is safely aside. A `movie` route plays the opening movie

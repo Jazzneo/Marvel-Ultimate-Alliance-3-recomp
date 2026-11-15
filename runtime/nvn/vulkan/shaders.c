@@ -169,7 +169,7 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
     if (n < 5 || spv[0] != 0x07230203) return 0;
     uint32_t bound = spv[3];
     int32_t *binding = malloc(bound * sizeof *binding), *set = malloc(bound * sizeof *set);
-    uint8_t *flags = calloc(bound, 1);    // 1 Block, 2 BufferBlock, 4 storage image (OpTypeImage Sampled = 2)
+    uint8_t *flags = calloc(bound, 1);    // 1 Block, 2 BufferBlock, 4 storage image (OpTypeImage Sampled = 2), 8 Dim Buffer
     uint32_t *op = calloc(bound, sizeof *op), *ref = calloc(bound, sizeof *ref), *sc = calloc(bound, sizeof *sc);
     for (uint32_t i = 0; i < bound; i++) binding[i] = set[i] = -1;
     for (size_t i = 5; i < n;) {
@@ -184,6 +184,8 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
         } else if ((o == OP_TYPE_IMAGE || o == OP_TYPE_SAMPLER || o == OP_TYPE_SAMPLED_IMAGE || o == OP_TYPE_STRUCT) && wc >= 2 && w[1] < bound) {
             op[w[1]] = o;
             if (o == OP_TYPE_IMAGE && wc >= 8 && w[7] == 2) flags[w[1]] |= 4;
+            if (o == OP_TYPE_IMAGE && wc >= 4 && w[3] == 5) flags[w[1]] |= 8;  // (Dim Buffer: a texel buffer)
+            if (o == OP_TYPE_SAMPLED_IMAGE && wc >= 3) ref[w[1]] = w[2];
         } else if ((o == OP_TYPE_ARRAY || o == OP_TYPE_RUNTIME_ARRAY) && wc >= 3 && w[1] < bound) {
             op[w[1]] = o;
             ref[w[1]] = w[2];
@@ -205,7 +207,10 @@ int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *out, int max) {
         while (t < bound && (op[t] == OP_TYPE_ARRAY || op[t] == OP_TYPE_RUNTIME_ARRAY)) t = ref[t];
         VkDescriptorType dt;
         if (t >= bound) continue;
-        if (op[t] == OP_TYPE_SAMPLED_IMAGE) dt = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        if (op[t] == OP_TYPE_SAMPLED_IMAGE)
+            dt = ref[t] < bound && (flags[ref[t]] & 8) ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        else if (op[t] == OP_TYPE_IMAGE && (flags[t] & 8))
+            dt = (flags[t] & 4) ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
         else if (op[t] == OP_TYPE_IMAGE) dt = (flags[t] & 4) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         else if (op[t] == OP_TYPE_SAMPLER) dt = VK_DESCRIPTOR_TYPE_SAMPLER;
         else if (op[t] == OP_TYPE_STRUCT && (sc[id] == SC_STORAGE_BUFFER || (flags[t] & 2))) dt = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
