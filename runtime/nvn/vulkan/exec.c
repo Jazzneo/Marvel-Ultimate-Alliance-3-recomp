@@ -4521,6 +4521,42 @@ static void gfast_flags_poll(void) {
     }
 }
 
+// Mirrors of the large ranges compute programs store into (the GPU's report, csw_note): the tiled light culling's
+// 8.4 MB tile lists, copied into gfast from the heap - across PCIe - and back after each of its two dispatches every
+// frame (~34 MB a frame, most of their 2.9 ms on an RTX 3060). After a storing dispatch the range also goes into a
+// device-local mirror of its own; the next dispatch binding the same range copies from the mirror when no page of it
+// was written since - by the CPU (the OS's page write tracking) or by any other GPU work (vc_mark_gpu: a storing draw
+// or dispatch over it, another table range's copy back) - and from the heap as before otherwise. The heap gets every
+// copy back as before (draws and the CPU read it there). LARECOMP_VK_GFAST_MIRROR=0: off.
+#define GM_N 8
+#define GM_MIN (1ull << 20)
+typedef struct { uint64_t lo, hi, xlo, xhi; VkBuffer buf; VmaAllocation mem; uint32_t gen; bool valid, sampled, keep; } GfMirror;
+static GfMirror gm[GM_N];
+static int gm_use[GMAP_MAX];   // this dispatch's table range i: its mirror (-1: none)
+static uint64_t prof_gm_hits, prof_gm_bytes;  // (LARECOMP_LOG_GFAST_MIRROR: ranges served from a mirror, bytes saved)
+static bool gm_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_VK_GFAST_MIRROR");
+        uint32_t g;
+        on = (!e || atoi(e) != 0) && pages_cpu_written(HEAP_BASE, 4096, 0, &g) >= 0;
+        LOG("[vk] compute output mirrors %s\n", on ? "on" : e && !atoi(e) ? "off (LARECOMP_VK_GFAST_MIRROR=0)" : "off: no page write tracking");
+    }
+    return on;
+}
+// GPU work writing heap offsets [lo, hi): the mirrors over it no longer match the heap (but the ones just refreshed by
+// the dispatch whose own stores these are: keep)
+static void gm_invalidate(uint64_t lo, uint64_t hi) {
+    for (int i = 0; i < GM_N; i++)
+        if (gm[i].buf && !gm[i].keep && gm[i].lo < hi && lo < gm[i].hi) gm[i].valid = gm[i].sampled = false;
+}
+static void gm_reset(void) {  // (a reboot, the GPU idle: the heap holds something else)
+    for (int i = 0; i < GM_N; i++) {
+        if (gm[i].buf) vmaDestroyBuffer(g_vk.vma, gm[i].buf, gm[i].mem);
+        memset(&gm[i], 0, sizeof gm[i]);
+    }
+}
+
 static VkDescriptorBufferInfo gfast_info(void) {
     if (!gfast_buf) {
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GFAST_SIZE,
@@ -4615,7 +4651,56 @@ static void gfast_prepare(VkCommandBuffer cb) {
             LOG("\n");
         }
     }
-    gmem_copy(cb, gfast_buf, cp, m, false);
+    // (mirrors) a large range a program stores into: from its mirror when nothing wrote it since, else sampled
+    // from the heap and its mirror made after the dispatch (gfast_finish)
+    VkBufferCopy hp[16];
+    int nh = 0;
+    uint64_t code = st.program->stages[5].code_addr;
+    for (int i = 0; i < m; i++) {
+        gm_use[i] = -1;
+        bool big = gm_on() && st_cs_stores && r[i].hi - r[i].lo >= GM_MIN;
+        bool out = false;
+        for (int s = 0; big && s < 16; s++) if ((r[i].slots >> s & 1) && cs_slot_class(code, true, s) == 1) out = true;
+        int k = -1, fresh = -1;
+        if (out)
+            for (int j = 0; j < GM_N; j++) {
+                if (gm[j].buf && gm[j].lo == r[i].lo && gm[j].hi == r[i].hi && gm[j].xlo == r[i].xlo && gm[j].xhi == r[i].xhi) { k = j; break; }
+                if (fresh < 0 && !gm[j].buf) fresh = j;
+            }
+        uint32_t now = 0;
+        int w = out ? pages_cpu_written(HEAP_BASE + r[i].lo, r[i].hi - r[i].lo, k >= 0 ? gm[k].gen : 0, &now) : -1;
+        if (k >= 0 && gm[k].valid && w == 0) {
+            VkBufferCopy c = {0, r[i].off, r[i].hi - r[i].lo};
+            rec_CmdCopyBuffer(cb, gm[k].buf, gfast_buf, 1, &c);
+            gm[k].gen = now;
+            gm_use[i] = k;
+            prof_gm_hits++, prof_gm_bytes += c.size;
+            continue;
+        }
+        hp[nh++] = cp[i];
+        if (w < 0) continue;
+        if (k < 0 && fresh >= 0) {  // (a new mirror: its buffer now, its contents after the dispatch)
+            VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = r[i].hi - r[i].lo,
+                                     .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+            VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+            if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &gm[fresh].buf, &gm[fresh].mem, NULL) == VK_SUCCESS) {
+                k = fresh;
+                gm[k].lo = r[i].lo, gm[k].hi = r[i].hi, gm[k].xlo = r[i].xlo, gm[k].xhi = r[i].xhi;
+            } else gm[fresh].buf = VK_NULL_HANDLE;
+        }
+        if (k < 0) continue;
+        gm[k].valid = false, gm[k].sampled = true, gm[k].gen = now;  // (the heap as of this look: made whole after the dispatch)
+        gm_use[i] = k;
+    }
+    gp_mark(cb, "  gfast in: %d ranges, %d from the heap", m, nh);
+    if (nh) gmem_copy(cb, gfast_buf, hp, nh, false);
+    {   // (debug) LARECOMP_LOG_GFAST_MIRROR=1: ranges served from a mirror, every 1000 storing dispatches
+        static int log = -1, n;
+        if (log < 0) log = getenv("LARECOMP_LOG_GFAST_MIRROR") != NULL;
+        if (log && st_cs_stores && ++n % 1000 == 0)
+            LOG("[gfast] mirrors: %llu ranges served, %llu MB not read across the bus\n", (unsigned long long)prof_gm_hits,
+                (unsigned long long)(prof_gm_bytes >> 20));
+    }
     vk_full_barrier(cb);
     gmap_tab[GMAP_MAX * 4] = (uint32_t)m;
     memcpy(gfast_cp, cp, (size_t)m * sizeof cp[0]);
@@ -4643,7 +4728,17 @@ static void gfast_finish(VkCommandBuffer cb) {
         gfr[rr].seq = vk_pending_seq(), gfr[rr].code = code, gfr[rr].stamp = gfast_stamp, gfr[rr].n = (uint8_t)gfast_n, gfr[rr].busy = true;
         memcpy(gfr[rr].slots, gfast_slots, sizeof gfast_slots);
     }
+    gp_mark(cb, "  gfast back: %d ranges", gfast_n);
     gmem_copy(cb, gfast_buf, gfast_back, gfast_n, true);  // (every range: a slot written only now and then is never skipped)
+    for (int i = 0; i < gfast_n; i++) {  // (mirrors: the range as the heap now has it)
+        int k = gm_use[i];
+        if (k < 0 || !gm[k].buf) continue;
+        // made from the heap: all of it; kept up: the bound bytes (the rest is the heap's as sampled)
+        VkBufferCopy c = gm[k].sampled ? (VkBufferCopy){gfast_cp[i].dstOffset, 0, gm[k].hi - gm[k].lo}
+                                       : (VkBufferCopy){gfast_back[i].srcOffset, gm[k].xlo - gm[k].lo, gm[k].xhi - gm[k].xlo};
+        rec_CmdCopyBuffer(cb, gfast_buf, gm[k].buf, 1, &c);
+        gm[k].valid = true, gm[k].sampled = false, gm[k].keep = true;  // (keep: past this dispatch's own vc_mark_sbufs)
+    }
     vk_full_barrier(cb);
     gfast_n = 0;
 }
@@ -4747,6 +4842,7 @@ static int pages_seen_written(uint64_t addr, uint64_t size, uint32_t since) {
 
 // Heap pages [lo, hi) (offsets) written by the GPU: never cached from now on.
 static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
+    gm_invalidate(lo, hi);  // (the compute output mirrors over these pages, but the ones its own dispatch just refreshed)
     if (!pt_init()) return;
     for (uint64_t p = lo / VC_PAGE; p < (hi + VC_PAGE - 1) / VC_PAGE && p < HEAP_MAX / VC_PAGE; p++) vc_page_gpu[p] = 1;
     vc_epoch++;
@@ -4912,6 +5008,7 @@ static int g_cs_n;  // (compute program table below)
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
 // programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
 void vk_exec_reset(void) {
+    gm_reset();
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
     key_gen++;  // (the key memo: the tables' answers are gone)
@@ -5625,11 +5722,13 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     if (gc_shift && cp->si->uses_gmem) gmem_chunk_bind(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, GMEM_CHUNK_SET(STAGE_COMPUTE), 1u << STAGE_COMPUTE);
+    if (cp->si->uses_gmem_map) gp_mark(cb, "  run");
     rec_CmdDispatch(cb, gx, gy, gz);
     for (int i = 0; i < cp->si->ntex; i++)  // (image stores: visible to the draws / copies after it)
         if (cp->si->tex[i].image_write) { vk_full_barrier(cb); break; }
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) gfast_finish(cb);
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5);
+    for (int i = 0; i < GM_N; i++) gm[i].keep = false;
     stat_dispatches++;
 }
 

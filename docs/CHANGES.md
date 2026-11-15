@@ -182,6 +182,8 @@ Added in this project:
 | `LARECOMP_LOG_MOVIE_OPEN=1` | each movie's open: its time, how much of the file it read, whether the streams were probed; each decoder's set-up time and thread |
 | `LARECOMP_MOVIE_PROBE=1` | every movie's streams probed (`avformat_find_stream_info`), as in 0.1.1 |
 | `LARECOMP_LOG_VKMEM=1` | each block of device memory allocated or freed, with the game's frame |
+| `LARECOMP_VK_GFAST_MIRROR=0` | no device-local mirrors of compute output ranges (every copy-in from the heap) |
+| `LARECOMP_LOG_GFAST_MIRROR=1` | ranges served from a mirror so far, every 1000 storing dispatches |
 
 Inherited from LAS Recomp and used here:
 
@@ -583,7 +585,7 @@ Expansion Pass.
   late frames, at the level's own loading as the movie ends), where it had shown up to 24. The full route at 30 and
   60 fps: 10 and 12 frames off the cadence in 5.5 minutes (25 and 22 the round before), game time 4.00 s in 4.00 s.
 
-## After 0.1.1: movie starts, the level's first frames, test routes (2026-11-14)
+## After 0.1.1: movie starts, light culling copies, the level's first frames, test routes (2026-11-14)
 
 - **A movie's start** (`runtime/hle/movie.c` `header_complete`): the game's main thread opens the movie and both
   decoders as it starts (`LARECOMP_LOG_MOVIE_OPEN`: all on the main thread, t80). `avformat_find_stream_info` decoded
@@ -598,6 +600,16 @@ Expansion Pass.
   a dedicated allocation (`LARECOMP_LOG_VKMEM`); taking them from the 256 MB blocks instead changed nothing (2, 6, 2
   frames off the cadence in that 10 s, against 0-7 before), so that isn't kept. Left: the scene's first frames are
   heavy for the GPU.
+- **The light culling's tile lists kept on the GPU** (`runtime/nvn/vulkan/exec.c`, the compute output mirrors): each
+  of the tiled light culling's two dispatches (`cs 72b4b35500`, `72b4b3bd00`) copied its 8.4 MB tile lists from the
+  heap - system memory, across PCIe - into the device-local table buffer, and back after it. A large range (1 MB or
+  more) that a program stores into (the GPU's report) now also goes into a device-local mirror after the dispatch,
+  and the next dispatch binding the same range copies from the mirror when nothing wrote its pages since: not the CPU
+  (the OS's page write tracking) and no other GPU work (a storing draw or dispatch over it: `vc_mark_gpu`). The copy
+  back to the heap stays (the lighting pass and the CPU read it there). Copy-in 0.39 + 0.19 -> 0.08 + 0.04 ms a
+  frame in the first level (RTX 3060; `LARECOMP_GPUPROF_AT`, now with each dispatch's copy-in, run and copy-back);
+  8 minutes of play (`route.sh play`): 25,000 ranges from a mirror, the lighting as before, no crash. Left there:
+  the copies back (0.4-0.6 ms each) and a dozen small dispatches of ~0.1 ms each, the shaders' own time.
 - **Test routes** (`tools/route.sh`): a failed move of `save/` aside (a file still held right after the run before)
   let a route play on the player's own save and then remove it. The move is now retried, the route doesn't run without
   it, and `save/` is only removed when the player's copy is safely aside. A `movie` route plays the opening movie
