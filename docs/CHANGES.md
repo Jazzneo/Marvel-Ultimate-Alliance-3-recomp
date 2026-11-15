@@ -183,7 +183,8 @@ Added in this project:
 | `LARECOMP_MOVIE_PROBE=1` | every movie's streams probed (`avformat_find_stream_info`), as in 0.1.1 |
 | `LARECOMP_LOG_VKMEM=1` | each block of device memory allocated or freed, with the game's frame |
 | `LARECOMP_VK_GFAST_MIRROR=0` | no device-local mirrors of compute output ranges (every copy-in from the heap) |
-| `LARECOMP_LOG_GFAST_MIRROR=1` | ranges served from a mirror so far, and texel buffer binds (of a mirror / their own copy), every 1000 storing dispatches |
+| `LARECOMP_LOG_GFAST_MIRROR=1` | ranges served from a mirror so far, those copied back by their changes, and texel buffer binds (of a mirror / their own copy), every 1000 storing dispatches |
+| `LARECOMP_VK_GFAST_DIFF=0` | compute output ranges copied back to the heap whole after each dispatch, as in 0.1.1 (no diff against the mirror) |
 | `LARECOMP_VK_TEXEL_BUFFERS=0` | buffer textures as 1D images copied every frame, as in 0.1.1 (no `samplerBuffer` variants) |
 
 Inherited from LAS Recomp and used here:
@@ -626,6 +627,16 @@ Expansion Pass.
   12.43 -> 11.94 ms (RTX 3060, 1080p: the uploads before a submission 1.13 -> 0.42 ms, the main work 10.95 -> 11.16).
   8 minutes of play (`route.sh play`): 85,000 binds of a mirror, the lighting as before, no crash; validation: no
   error from these.
+- **The light culling's copies back: only what changed** (`runtime/nvn/vulkan/exec.c` `gdiff_run`): after each of
+  its dispatches the tile lists, 8.4 + 4.2 MB, still went back to the heap whole across PCIe (1.1 + 0.4 ms of the
+  frame in `LARECOMP_GPUPROF_AT`). Measured frame to frame, the 8.4 MB list is all zeros at the frame's end and the
+  4.2 MB one changes by ~250 words (~1 KB). When a dispatch's input came from its mirror - so the heap, the mirror and
+  the input held the same bytes - a small compute shader of the runtime's own now compares the output with the mirror
+  (both device-local), writes only the words that differ to the heap and brings the mirror up to date; other ranges
+  are copied whole as before. The heap ends byte for byte as after the whole copy: checked against a copy of the
+  dispatch's output after every frame, 0 differences in 5,852 checks (one heap import) and 6,456 (lazy 16 MB chunks,
+  `LARECOMP_VK_GMEM_LAZY=1`). In one 400 s play run alternating every 180 frames: GPU frame span 12.56 -> 11.79 ms
+  (RTX 3060, 1080p). `LARECOMP_VK_GFAST_DIFF=0`: whole copies, as before.
 - **Test routes** (`tools/route.sh`): a failed move of `save/` aside (a file still held right after the run before)
   let a route play on the player's own save and then remove it. The move is now retried, the route doesn't run without
   it, and `save/` is only removed when the player's copy is safely aside. A `movie` route plays the opening movie

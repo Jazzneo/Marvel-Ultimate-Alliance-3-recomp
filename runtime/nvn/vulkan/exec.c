@@ -4539,6 +4539,7 @@ typedef struct { uint64_t lo, hi, xlo, xhi; VkBuffer buf; VmaAllocation mem; uin
 static GfMirror gm[GM_N];
 static int gm_use[GMAP_MAX];   // this dispatch's table range i: its mirror (-1: none)
 static uint64_t prof_gm_hits, prof_gm_bytes;  // (LARECOMP_LOG_GFAST_MIRROR: ranges served from a mirror, bytes saved)
+static uint64_t prof_gdiff_ranges, prof_gdiff_bytes;  // (and copied back by their changes: gdiff_run)
 static bool gm_on(void) {
     static int on = -1;
     if (on < 0) {
@@ -4706,7 +4707,8 @@ static void gfast_prepare(VkCommandBuffer cb) {
         if (k < 0 && fresh >= 0) {  // (a new mirror: its buffer now, its contents after the dispatch)
             VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = r[i].hi - r[i].lo,
                                      .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                                              VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT};  // (textures.c vk_texel_view)
+                                              VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |  // (textures.c vk_texel_view)
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};       // (gdiff_run)
             VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
             if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &gm[fresh].buf, &gm[fresh].mem, NULL) == VK_SUCCESS) {
                 k = fresh;
@@ -4725,15 +4727,108 @@ static void gfast_prepare(VkCommandBuffer cb) {
         if (log && st_cs_stores && ++n % 1000 == 0)
         {
             extern uint64_t prof_texel_mirror, prof_texel_own;
-            LOG("[gfast] mirrors: %llu ranges served, %llu MB not read across the bus; texel buffer binds %llu of a mirror, "
-                "%llu of their own copy\n", (unsigned long long)prof_gm_hits, (unsigned long long)(prof_gm_bytes >> 20),
-                (unsigned long long)prof_texel_mirror, (unsigned long long)prof_texel_own);
+            LOG("[gfast] mirrors: %llu ranges served, %llu MB not read across the bus; %llu copied back by their changes "
+                "(%llu MB not written across it); texel buffer binds %llu of a mirror, %llu of their own copy\n",
+                (unsigned long long)prof_gm_hits, (unsigned long long)(prof_gm_bytes >> 20), (unsigned long long)prof_gdiff_ranges,
+                (unsigned long long)(prof_gdiff_bytes >> 20), (unsigned long long)prof_texel_mirror, (unsigned long long)prof_texel_own);
         }
     }
     vk_full_barrier(cb);
     gmap_tab[GMAP_MAX * 4] = (uint32_t)m;
     memcpy(gfast_cp, cp, (size_t)m * sizeof cp[0]);
     gfast_n = m;
+}
+
+// The copy back of a mirrored range whose gfast copy came from its mirror (so the heap, the mirror and the dispatch's
+// input all held the same bytes): only the words the dispatch changed are written to the heap, by a small compute
+// shader comparing gfast with the mirror (both device-local) - which also brings the mirror up to date. The light
+// culling's lists, 12.6 MB copied across PCIe every frame (1.5 ms of an RTX 3060's frame), change by about 1 KB a
+// frame: the rest is zero or as it was. The heap ends up byte for byte as after the whole copy, and words the
+// dispatch didn't change aren't written at all. LARECOMP_VK_GFAST_DIFF=0: the whole copy as before.
+static const char *gdiff_src =
+    "#version 450\n"
+    "layout(local_size_x = 256) in;\n"
+    "layout(set = 0, binding = 0) readonly buffer S { uint s[]; };\n"
+    "layout(set = 0, binding = 1) buffer O { uint o[]; };\n"
+    "layout(set = 0, binding = 2) writeonly buffer D { uint d[]; };\n"
+    "layout(push_constant) uniform P { uint base, count; } p;\n"
+    "void main() {\n"
+    "    uint step = gl_NumWorkGroups.x * 256u;\n"
+    "    for (uint i = gl_GlobalInvocationID.x; i < p.count; i += step) {\n"
+    "        uint v = s[p.base + i];\n"
+    "        if (v != o[p.base + i]) { o[p.base + i] = v; d[p.base + i] = v; }\n"
+    "    }\n"
+    "}\n";
+static VkDescriptorSetLayout gdiff_dsl;
+static VkPipelineLayout gdiff_layout;
+static VkPipeline gdiff_pipe;
+static bool gdiff_ready(void) {
+    static int state = -1;  // 1 made, 0 off / failed
+    if (state >= 0) return state;
+    const char *e = getenv("LARECOMP_VK_GFAST_DIFF");
+    state = 0;
+    if (e && !atoi(e)) { LOG("[vk] compute output copy back: whole ranges (LARECOMP_VK_GFAST_DIFF=0)\n"); return false; }
+    VkShaderModule m = vk_compile_glsl(gdiff_src, STAGE_COMPUTE, "gfast_diff");
+    if (!m) return false;
+    VkDescriptorSetLayoutBinding lb[3];
+    for (int i = 0; i < 3; i++) lb[i] = (VkDescriptorSetLayoutBinding){(uint32_t)i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+    VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 3, .pBindings = lb};
+    VkPushConstantRange pc = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 8};
+    VkComputePipelineCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                      .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"}};
+    if (vkCreateDescriptorSetLayout(g_vk.dev, &dci, NULL, &gdiff_dsl) == VK_SUCCESS) {
+        VkPipelineLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &gdiff_dsl,
+                                          .pushConstantRangeCount = 1, .pPushConstantRanges = &pc};
+        if (vkCreatePipelineLayout(g_vk.dev, &lci, NULL, &gdiff_layout) == VK_SUCCESS) {
+            ci.layout = gdiff_layout;
+            if (vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &gdiff_pipe) == VK_SUCCESS) state = 1;
+        }
+    }
+    vkDestroyShaderModule(g_vk.dev, m, NULL);
+    LOG("[vk] compute output copy back: %s\n", state ? "the changed words of mirrored ranges" : "whole ranges (the diff pipeline failed)");
+    return state;
+}
+// Table range i (mirror k, its gfast copy taken from the mirror): the diff dispatches, one per heap chunk piece of
+// the range in lazy mode. False (nothing recorded): the whole copy instead.
+typedef struct { VkBuffer b; uint64_t off, plo, phi; } GdiffPiece;
+static bool gdiff_run(VkCommandBuffer cb, int i, int k) {
+    uint64_t lo = gm[k].lo, hi = gm[k].hi, xlo = gm[k].xlo, xhi = gm[k].xhi, src = gfast_cp[i].dstOffset;
+    if ((xlo | xhi) & 3 || xhi <= xlo || !gdiff_ready()) return false;
+    GdiffPiece pc[8];
+    int np = 0;
+    if (!gc_lazy) {
+        if (!gmem_buf || hi > gmem_size) return false;
+        pc[np++] = (GdiffPiece){gmem_buf, lo, lo, hi};
+    } else {
+        for (uint64_t a = lo; a < hi;) {
+            int c = (int)(a >> gc_shift);
+            uint64_t cbase = (uint64_t)c << gc_shift, ce = cbase + (1ull << gc_shift), e = ce < hi ? ce : hi;
+            if (np == 8 || c >= gc_n || !gc[c].buf || e - cbase > gc[c].size) return false;
+            pc[np++] = (GdiffPiece){gc[c].buf, a - cbase, a, e};
+            a = e;
+        }
+    }
+    rec_CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, gdiff_pipe);
+    for (int j = 0; j < np; j++) {
+        uint64_t wlo = xlo > pc[j].plo ? xlo : pc[j].plo, whi = xhi < pc[j].phi ? xhi : pc[j].phi;
+        if (whi <= wlo) continue;
+        uint64_t len = pc[j].phi - pc[j].plo;
+        VkDescriptorSet set = vk_alloc_set(gdiff_dsl);
+        VkDescriptorBufferInfo bi[3] = {{gfast_buf, src + (pc[j].plo - lo), len}, {gm[k].buf, pc[j].plo - lo, len}, {pc[j].b, pc[j].off, len}};
+        VkWriteDescriptorSet w[3];
+        for (int b = 0; b < 3; b++)
+            w[b] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = (uint32_t)b,
+                                          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[b]};
+        rec_UpdateDescriptorSets(3, w);
+        rec_CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, gdiff_layout, 0, 1, &set, 0, NULL);
+        uint32_t pcv[2] = {(uint32_t)((wlo - pc[j].plo) >> 2), (uint32_t)((whi - wlo) >> 2)};
+        rec_CmdPushConstants(cb, gdiff_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pcv, pcv);
+        uint32_t groups = (pcv[1] + 255) / 256;
+        rec_CmdDispatch(cb, groups < 2048 ? groups : 2048, 1, 1);
+    }
+    prof_gdiff_ranges++, prof_gdiff_bytes += xhi - xlo;
+    return true;
 }
 
 // After a storing dispatch: its ranges back to the heap (before anything else reads them: draws, the CPU after the fence).
@@ -4758,10 +4853,20 @@ static void gfast_finish(VkCommandBuffer cb) {
         memcpy(gfr[rr].slots, gfast_slots, sizeof gfast_slots);
     }
     gp_mark(cb, "  gfast back: %d ranges", gfast_n);
-    gmem_copy(cb, gfast_buf, gfast_back, gfast_n, true);  // (every range: a slot written only now and then is never skipped)
+    // (every range: a slot written only now and then is never skipped; those from an unchanged mirror: its changed words)
+    VkBufferCopy whole[GMAP_MAX];
+    bool diffed[GMAP_MAX];
+    int nw = 0;
+    for (int i = 0; i < gfast_n; i++) {
+        int k = gm_use[i];
+        diffed[i] = k >= 0 && gm[k].buf && gm[k].valid && !gm[k].sampled && gdiff_run(cb, i, k);
+        if (!diffed[i]) whole[nw++] = gfast_back[i];
+    }
+    if (nw) gmem_copy(cb, gfast_buf, whole, nw, true);
     for (int i = 0; i < gfast_n; i++) {  // (mirrors: the range as the heap now has it)
         int k = gm_use[i];
         if (k < 0 || !gm[k].buf) continue;
+        if (diffed[i]) { gm[k].valid = true, gm[k].keep = true; continue; }  // (the diff wrote it)
         // made from the heap: all of it; kept up: the bound bytes (the rest is the heap's as sampled)
         VkBufferCopy c = gm[k].sampled ? (VkBufferCopy){gfast_cp[i].dstOffset, 0, gm[k].hi - gm[k].lo}
                                        : (VkBufferCopy){gfast_back[i].srcOffset, gm[k].xlo - gm[k].lo, gm[k].xhi - gm[k].xlo};
