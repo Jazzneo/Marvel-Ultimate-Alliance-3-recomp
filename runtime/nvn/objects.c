@@ -936,7 +936,8 @@ static uint64_t pace_slot(uint64_t next, uint64_t refresh, uint64_t period, bool
     *slot = (uint64_t)((int64_t)at - pace_phase_err(at, vb, refresh));
     static int log = -1;
     if (log < 0) log = getenv("LARECOMP_LOG_PACE_LOCK") != NULL;
-    if (log) LOG("[pace] present moved %+.3f ms, lead %.2f ms, slot %.2f ms after it\n", c / 1e6, lead / 1e6,
+    if (log) LOG("[pace] present moved %+.3f ms, lead %.2f ms (GPU %.2f, slowest %.2f, extra %.2f), slot %.2f ms after it\n",
+                 c / 1e6, lead / 1e6, gi ? gpu_win[(gi - 1) % 30] / 1e6 : 0.0, gpu_max / 1e6, extra / 1e6,
                  ((int64_t)*slot - (int64_t)next) / 1e6);
     return next;
 }

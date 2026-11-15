@@ -4,6 +4,7 @@
 #   menus   fresh save: title, patch notes, save slot, difficulty -> "Save data has been created"     ~110 s
 #   kree    fresh save: as menus, then the opening movie (skipped) and the first level (the Kree ship) ~170 s
 #   play    fresh save: as kree, then ~6 minutes of moving, attacking, jumping and switching heroes        ~520 s
+#   movie   fresh save: as menus, then the opening movie played through (not skipped)                    ~300 s
 # Fresh-save routes move save/ aside first and put it back afterwards (the game autosaves).
 # Frames are presented frames (30 fps); load times shift them a little between runs. Confirmation dialogs start on
 # CANCEL: LEFT then A.
@@ -20,6 +21,9 @@ menus)
 kree)
     in="$menus,3000:A:8,3300:PLUS:8,3400:X:8$(seq_presses A 3700 150 6000)"  # (the opening: + pauses, X skips)
     : "${secs:=170}" ;;
+movie)
+    in="$menus,3000:A:8"
+    : "${secs:=300}" ;;
 play)  # as kree, then ~6 minutes of play: moving in turn in eight directions, attacks, jumps, character switches
     in="$menus,3000:A:8,3300:PLUS:8,3400:X:8$(seq_presses A 3700 150 4300)"
     a=0
@@ -30,13 +34,24 @@ play)  # as kree, then ~6 minutes of play: moving in turn in eight directions, a
     done
     : "${secs:=520}" ;;
 *)
-    sed -n '2,9p' "$0"; exit 1 ;;
+    sed -n '2,10p' "$0"; exit 1 ;;
 esac
 if [ -d save.route-backup ]; then  # (never deleted here: it may be the only copy of a save)
     echo "save.route-backup exists (an interrupted run?): put it back as save/ or remove it first"; exit 1
 fi
-[ -d save ] && mv save save.route-backup
+# The player's save is moved aside, and the route's own save is removed afterwards only when the move worked: a failed
+# move (a file still held by the last run, or by a virus scanner) once left the real save in place for the route to play
+# on, and then to remove.
+had_save=
+if [ -d save ]; then
+    for i in 1 2 3 4 5; do mv save save.route-backup 2>/dev/null && break; sleep 2; done
+    if [ -d save ] || [ ! -d save.route-backup ]; then echo "could not move save/ aside: not running"; exit 1; fi
+    had_save=1
+fi
 [ -n "$shots" ] && export LARECOMP_SHOT_AT="$shots"
 LARECOMP_INPUT="$in" tools/run.sh "$secs"
-rm -rf save
-[ -d save.route-backup ] && mv save.route-backup save
+if [ -z "$had_save" ] || [ -d save.route-backup ]; then rm -rf save; fi
+if [ -d save.route-backup ]; then
+    for i in 1 2 3 4 5; do [ -d save ] && rm -rf save; mv save.route-backup save 2>/dev/null && break; sleep 2; done
+    [ -d save.route-backup ] && echo "the save is still in save.route-backup: put it back as save/"
+fi

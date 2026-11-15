@@ -179,6 +179,9 @@ Added in this project:
 | `LARECOMP_PACE_LOCK=0` | frames not locked to the display's refresh (the pace's own 60 Hz clock, as before) |
 | `LARECOMP_LOG_PACE_LOCK=1` | each frame's slot, lead and correction (the display lock) |
 | `LARECOMP_PRESENT_TIMING=0` / `=2` | no `[present]` cadence lines / one line per frame (when it reached the screen, where in the refresh, uploads and pipelines since, the render thread's time and its texture part) |
+| `LARECOMP_LOG_MOVIE_OPEN=1` | each movie's open: its time, how much of the file it read, whether the streams were probed; each decoder's set-up time and thread |
+| `LARECOMP_MOVIE_PROBE=1` | every movie's streams probed (`avformat_find_stream_info`), as in 0.1.1 |
+| `LARECOMP_LOG_VKMEM=1` | each block of device memory allocated or freed, with the game's frame |
 
 Inherited from LAS Recomp and used here:
 
@@ -579,6 +582,29 @@ Expansion Pass.
 - **Checked:** in seven runs of the opening movie, its 10 s window showed 2-6 frames off the cadence (one to three
   late frames, at the level's own loading as the movie ends), where it had shown up to 24. The full route at 30 and
   60 fps: 10 and 12 frames off the cadence in 5.5 minutes (25 and 22 the round before), game time 4.00 s in 4.00 s.
+
+## After 0.1.1: movie starts, the level's first frames, test routes (2026-11-14)
+
+- **A movie's start** (`runtime/hle/movie.c` `header_complete`): the game's main thread opens the movie and both
+  decoders as it starts (`LARECOMP_LOG_MOVIE_OPEN`: all on the main thread, t80). `avformat_find_stream_info` decoded
+  the first packets of each stream with decoders of its own: 3.5 ms each time, 34 ms in a run with nothing of it in
+  memory yet - for what an MP4's header says already, except the pixel and sample formats (the decoders find them)
+  and the file's length (now taken from its streams'). An MP4 or WebM whose header has codec, size, frame rate,
+  sample rate and channels isn't probed now; anything else is, as before. The opening movie's start: 6.7 -> 3 ms of
+  the main thread; it reads 128 KB of the file to open it.
+- **The level's first frames, looked at and not changed:** the one to three late frames as the first level begins
+  (after the opening movie, played or skipped) are frames whose GPU work ends 12-15 ms after their slot - the render
+  thread's part of them is short (0.6-4 ms). The level creates ~85 MB of render targets in three frames there, each in
+  a dedicated allocation (`LARECOMP_LOG_VKMEM`); taking them from the 256 MB blocks instead changed nothing (2, 6, 2
+  frames off the cadence in that 10 s, against 0-7 before), so that isn't kept. Left: the scene's first frames are
+  heavy for the GPU.
+- **Test routes** (`tools/route.sh`): a failed move of `save/` aside (a file still held right after the run before)
+  let a route play on the player's own save and then remove it. The move is now retried, the route doesn't run without
+  it, and `save/` is only removed when the player's copy is safely aside. A `movie` route plays the opening movie
+  through.
+- **Checked:** the opening movie played through (300 s route) and skipped into the first level (170 s route): 0-2
+  frames off the cadence in each 10 s after the title, the movie's picture and sound as before, no crash; the save
+  in place before and after, byte for byte.
 
 ## Status (MUA3, 2026-11-01)
 

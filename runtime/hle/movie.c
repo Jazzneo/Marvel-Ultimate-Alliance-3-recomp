@@ -185,9 +185,10 @@ static void ok(Cpu *c) { c->x[0] = 0; }
 
 // ------------------------------------------------------------------ Extractor
 // a movie read from the romfs image (no host copy: the game data read in place from the NSPs; fs.c)
+uint64_t kernel_current_thread_id(void);  // (kernel.c: the LARECOMP_LOG_MOVIE_OPEN lines)
 bool romfs_file_find(const char *rel, uint64_t *off, uint64_t *size);
 ssize_t romfs_image_read(void *dst, uint64_t n, uint64_t off);
-typedef struct { uint64_t off, size, pos; } RomSrc;
+typedef struct { uint64_t off, size, pos, nread, reads; } RomSrc;
 static int rom_avio_read(void *o, uint8_t *buf, int n) {
     RomSrc *s = o;
     if (s->pos >= s->size) return AVERROR_EOF;
@@ -195,6 +196,7 @@ static int rom_avio_read(void *o, uint8_t *buf, int n) {
     ssize_t r = romfs_image_read(buf, (uint64_t)n, s->off + s->pos);
     if (r <= 0) return AVERROR_EOF;
     s->pos += (uint64_t)r;
+    s->nread += (uint64_t)r, s->reads++;
     return (int)r;
 }
 static int64_t rom_avio_seek(void *o, int64_t to, int whence) {
@@ -267,6 +269,38 @@ static void ex_fill(Extractor *e) {
 
 // Slot 15 SetDataSource(ClientStreamReader*, const char *path) (LA) and slot 2 SetDataSource(const char *path)
 // (DOAX3: its movies, "rom:/movie/MOV_OPENING.mp4").
+// The container's header says everything the game is told (codec, size, frame rate, sample rate, channels, length):
+// then the streams aren't probed. avformat_find_stream_info opens decoders of its own and decodes the first packets of
+// each stream to fill in what a header may leave out - on the game's main thread as a movie starts: 3.5 ms each time
+// (the opening movie, its file in memory), 34 ms in a run with nothing of it in memory yet (FFmpeg's code not yet read
+// in) - for nothing an MP4 hasn't said already: the pixel and sample formats (the decoders find them themselves) and
+// the length (from the streams', below). MP4 and WebM only; anything else is probed as before.
+// LARECOMP_MOVIE_PROBE=1 (debug): every movie probed; LARECOMP_LOG_MOVIE_OPEN=1: the open's and decoders' times.
+static bool header_complete(AVFormatContext *f) {
+    const char *n = f->iformat ? f->iformat->name : "";
+    if (!strstr(n, "mp4") && !strstr(n, "webm")) return false;
+    int64_t dur = 0;
+    for (unsigned i = 0; i < f->nb_streams; i++) {
+        AVStream *s = f->streams[i];
+        AVCodecParameters *p = s->codecpar;
+        if (p->codec_type == AVMEDIA_TYPE_VIDEO) {
+            if (p->codec_id == AV_CODEC_ID_NONE || p->width <= 0 || p->height <= 0 || s->avg_frame_rate.num <= 0 ||
+                s->avg_frame_rate.den <= 0) return false;
+        } else if (p->codec_type == AVMEDIA_TYPE_AUDIO) {
+            if (p->codec_id == AV_CODEC_ID_NONE || p->sample_rate <= 0 || p->ch_layout.nb_channels <= 0) return false;
+        } else continue;
+        if (s->duration > 0 && s->time_base.den > 0) {
+            int64_t d = av_rescale_q(s->duration, s->time_base, AV_TIME_BASE_Q);
+            if (d > dur) dur = d;
+        }
+    }
+    if (f->duration <= 0 || f->duration == AV_NOPTS_VALUE) {
+        if (dur <= 0) return false;
+        f->duration = dur;
+    }
+    return true;
+}
+
 static void ex_open_path(Cpu *c, const char *path);
 static void ex_set_data_source(Cpu *c) { ex_open_path(c, (const char *)(uintptr_t)c->x[2]); }
 static void ex_set_data_source_path(Cpu *c) { ex_open_path(c, (const char *)(uintptr_t)c->x[1]); }
@@ -301,7 +335,21 @@ static void ex_open_path(Cpu *c, const char *path) {
         if (e->avio) e->fmt->pb = e->avio;
         else { av_free(buf); avformat_free_context(e->fmt); e->fmt = NULL; }
     }
-    if (avformat_open_input(&e->fmt, host, NULL, NULL) < 0 || avformat_find_stream_info(e->fmt, NULL) < 0) {
+    uint64_t t0 = plat_now_ns();
+    int r0 = avformat_open_input(&e->fmt, host, NULL, NULL);
+    uint64_t t1 = plat_now_ns(), read0 = e->rom ? e->rom->nread : 0, reads0 = e->rom ? e->rom->reads : 0;
+    bool probed = false;
+    if (r0 >= 0 && (getenv("LARECOMP_MOVIE_PROBE") || !header_complete(e->fmt))) {
+        probed = true;
+        if (avformat_find_stream_info(e->fmt, NULL) < 0) r0 = -1;
+    }
+    if (getenv("LARECOMP_LOG_MOVIE_OPEN"))
+        LOG("[movie] (t%llu) opened in %.2f ms (%llu KB in %llu reads), %s %.2f ms (%llu KB in %llu reads)\n",
+            (unsigned long long)kernel_current_thread_id(), (t1 - t0) / 1e6,
+            (unsigned long long)(read0 >> 10), (unsigned long long)reads0, probed ? "probed" : "not probed",
+            (plat_now_ns() - t1) / 1e6, (unsigned long long)(((e->rom ? e->rom->nread : 0) - read0) >> 10),
+            (unsigned long long)((e->rom ? e->rom->reads : 0) - reads0));
+    if (r0 < 0) {
         LOG("[movie] cannot open %s\n", host);
         ex_close_input(e);
         c->x[0] = 1;
@@ -558,6 +606,7 @@ static void dec_configure(Cpu *c) {
     MediaData *m = md(c->x[1]);
     AVCodecParameters *p = m->codecpar;
     if (!p) { LOG("[movie] Configure without codec parameters\n"); c->x[0] = 1; return; }
+    uint64_t tc0 = plat_now_ns();
     const AVCodec *codec = avcodec_find_decoder(p->codec_id);
     d->ctx = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(d->ctx, p);
@@ -576,6 +625,8 @@ static void dec_configure(Cpu *c) {
     for (int i = 0; i < NIN; i++) d->in_mem[i] = buf_get(d->in_cap);
     for (int i = 0; i < NOUT; i++) d->out_mem[i] = buf_get(d->out_cap);
     LOG("[movie] decoder %s configured: %dx%d %d Hz %d ch\n", codec->name, d->width, d->height, d->sample_rate, d->channels);
+    if (getenv("LARECOMP_LOG_MOVIE_OPEN"))
+        LOG("[movie] (t%llu) configured in %.2f ms\n", (unsigned long long)kernel_current_thread_id(), (plat_now_ns() - tc0) / 1e6);
     c->x[0] = 0;
 }
 

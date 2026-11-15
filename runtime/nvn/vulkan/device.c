@@ -275,6 +275,19 @@ void vk_device_fault_report(void) {
             (unsigned long long)vend[i].vendorFaultData);
 }
 
+// (debug) LARECOMP_LOG_VKMEM=1: each block of device memory VMA allocates or frees, with the game's frame
+uint64_t renderer_present_count(void);
+static void VKAPI_PTR vk_mem_allocated(VmaAllocator a, uint32_t type, VkDeviceMemory m, VkDeviceSize size, void *u) {
+    (void)a, (void)m, (void)u;
+    LOG("[vkmem] frame %llu: +%llu KB (type %u)\n", (unsigned long long)renderer_present_count(),
+        (unsigned long long)(size >> 10), type);
+}
+static void VKAPI_PTR vk_mem_freed(VmaAllocator a, uint32_t type, VkDeviceMemory m, VkDeviceSize size, void *u) {
+    (void)a, (void)m, (void)u;
+    LOG("[vkmem] frame %llu: -%llu KB (type %u)\n", (unsigned long long)renderer_present_count(),
+        (unsigned long long)(size >> 10), type);
+}
+
 // Each memory heap: its size, the driver's budget for this process (smaller when other programs hold that memory),
 // this process's use and the part LAS Recomp allocated through VMA. Logged at start and when an allocation fails
 // (issue #45: out of device memory on a 6 GB GTX 1060 - our own use, or other programs'?).
@@ -545,8 +558,10 @@ static void create_device(void) {
             "in each pipeline (vkCmdSetVertexInputEXT missing)");
     }
 
+    static const VmaDeviceMemoryCallbacks mem_cb = {vk_mem_allocated, vk_mem_freed, NULL};
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
                                  .vulkanApiVersion = VK_API_VERSION_1_3,
+                                 .pDeviceMemoryCallbacks = getenv("LARECOMP_LOG_VKMEM") ? &mem_cb : NULL,
                                  .flags = budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0};
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
     vk_log_memory("start");
