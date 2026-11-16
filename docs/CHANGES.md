@@ -185,6 +185,7 @@ Added in this project:
 | `LARECOMP_VK_GFAST_MIRROR=0` | no device-local mirrors of compute output ranges (every copy-in from the heap) |
 | `LARECOMP_LOG_GFAST_MIRROR=1` | ranges served from a mirror so far, those copied back by their changes, and texel buffer binds (of a mirror / their own copy), every 1000 storing dispatches |
 | `LARECOMP_VK_GFAST_DIFF=0` | compute output ranges copied back to the heap whole after each dispatch, as in 0.1.1 (no diff against the mirror) |
+| `LARECOMP_VK_MINPC=0` | compute shaders' lanes not kept in step: each lane of a branching shader's state machine runs on its own, as in 0.1.2 |
 | `LARECOMP_VK_TEXEL_BUFFERS=0` | buffer textures as 1D images copied every frame, as in 0.1.1 (no `samplerBuffer` variants) |
 
 Inherited from LAS Recomp and used here:
@@ -644,6 +645,35 @@ Expansion Pass.
 - **Checked:** the opening movie played through (300 s route) and skipped into the first level (170 s route): 0-2
   frames off the cadence in each 10 s after the title, the movie's picture and sound as before, no crash; the save
   in place before and after, byte for byte.
+
+## After 0.1.2: compute shaders' lanes kept in step (2026-11-15)
+
+- **Measured** (`LARECOMP_GPUPROF_AT`, the first level, RTX 3060): the compute dispatches were ~4 ms of the GPU's
+  frame - the light culling's second pass 1.3 ms, and six small effect programs run six times each on 1-19 workgroups
+  of 64 (~0.1 ms a dispatch, the GPU otherwise idle). None of them reads or writes the heap across PCIe any more
+  (counted per dispatch: no accesses outside their device-local tables), so the time was the shaders' own.
+- **Found:** the translator runs a shader with branches as a state machine (`switch (pc)` in a loop). Lanes of a
+  subgroup whose paths through a branch take a different number of steps stay out of step for the rest of the
+  shader - each step then runs the warp's cases one after another, half full - where the GPU the shaders were written
+  for brings them back together (SSY / SYNC). The light culling's warp-wide atomics (a ballot, one lane's
+  `atomicAdd`, a shuffle) then ran once per part of the warp instead of once.
+- **Changed** (`runtime/nvn/maxwell/translate.c`, `maxwell_glsl_minpc` in `shader.h`; `vulkan/device.c`): in a
+  compute shader each step runs only the lanes at the subgroup's lowest pc (`subgroupMin`), the others waiting
+  (their waits don't count toward the loop's step limit), so lanes meet again where their paths join. On when the GPU
+  has subgroup arithmetic in compute shaders (`[vk] compute lanes kept in step` in the log). Compute run time 4.07 ->
+  2.87 ms a frame in the profiled frames (the light culling's second pass 1.29 -> 0.83 ms, the effect programs 10-30 %
+  less); in one 520 s play run switching every 180 frames: GPU frame span 12.50 -> 11.95 ms (median 12.50 -> 12.20).
+  The order of a tile's lights may differ (it already could: atomics), the image doesn't. Validation: no new errors.
+- **Not for vertex and fragment shaders:** the same in every stage made the graphics passes slower (one effects pass
+  0.35 -> 4-5 ms in some frames: helper invocations at triangle edges waiting).
+- **Tried, not kept: the small dispatches side by side.** Each of the six effect programs runs on separate buffers in
+  a row, so their copies back were deferred and the next dispatch ran alongside when its ranges didn't overlap a
+  pending one's. 4 dispatches a frame joined - the others share a 4-byte counter every dispatch adds to (the GPU's
+  store report), so they depend on each other - and the frame span went 12.07 -> 11.83 ms with the same median: not
+  worth the change to how compute results reach the heap.
+- **Measuring:** a screenshot in a run (`LARECOMP_SHOT_AT`) takes ~270 ms, and after it the frames sit differently
+  against the display: `LARECOMP_VK_PROF`'s span then counts ~5 ms of waiting for the window's image in every frame
+  (the gap; the game's GPU time unchanged). Runs that measure take no screenshots.
 
 ## Status (MUA3, 2026-11-01)
 

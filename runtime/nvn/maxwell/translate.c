@@ -26,6 +26,7 @@ uint64_t maxwell_gmem_base, maxwell_gmem_size;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 bool maxwell_gmem_lazy;
 bool maxwell_gmem_fs_miss;
+bool maxwell_glsl_minpc;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -2457,6 +2458,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     Str s = {0};
     sp(&s, "#version 460\n");  // (the prelude's first line; an extension directive has to follow it)
     if (info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy) sp(&s, "#extension GL_EXT_buffer_reference : require\n");
+    if (stage == STAGE_COMPUTE && maxwell_glsl_minpc) sp(&s, "#extension GL_KHR_shader_subgroup_arithmetic : require\n");
     sp(&s, "%s", glsl_prelude + sizeof "#version 460\n" - 1);
     static int exact = -1;
     if (exact < 0) exact = getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0;
@@ -2662,7 +2664,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0u; uint pbk[16]; uint pbk_n = 0u; uint pcnt[16]; uint pcnt_n = 0u;\n");
         sp(&s, "  uint cst[16]; uint cst_n = 0u;\n");
         sp(&s, "  bool exit_now = false;\n");
-        sp(&s, "  for (uint guard = 0u; guard < 100000u; guard++) {\n  switch (pc) {\n");
+        sp(&s, "  for (uint guard = 0u; guard < 100000u; guard++) {\n");
+        if (stage == STAGE_COMPUTE && maxwell_glsl_minpc)  // (shader.h; a wait isn't one of the lane's own steps)
+            sp(&s, "  if (pc != subgroupMin(pc)) { guard--; continue; }\n");
+        sp(&s, "  switch (pc) {\n");
         sp(&s, "%s", body.buf ? body.buf : "");
         sp(&s, "    exit_now = true; break;\n  default: exit_now = true; break;\n  }\n  if (exit_now) break;\n  }\n");
     } else {

@@ -10,6 +10,7 @@
 
 #include "../../paths.h"
 #include "../../rt.h"  // (HEAP_MAX: lazy_heap_predicted)
+#include "../maxwell/shader.h"  // (maxwell_glsl_minpc)
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "../rqueue.h"
@@ -247,6 +248,16 @@ static void pick_device(void) {
     g_vk.no_frame_clear = e && *e ? atoi(e) != 0 : igpu;
     LOG("[vk] lean usage %s, SMAA stencil %s, per-frame target clears %s (%s GPU)\n", g_vk.lean_usage ? "on" : "off",
         g_vk.smaa_stencil ? "on" : "off", g_vk.no_frame_clear ? "off" : "on", igpu ? "integrated" : "not an integrated");
+    {   // compute shaders' lanes kept in step (maxwell/shader.h maxwell_glsl_minpc): needs subgroup arithmetic there
+        VkPhysicalDeviceSubgroupProperties sg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sg};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
+        bool can = (sg.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) && (sg.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT);
+        e = getenv("LARECOMP_VK_MINPC");
+        maxwell_glsl_minpc = can && (!e || !*e || atoi(e) != 0);
+        LOG("[vk] compute lanes kept in step: %s (subgroup size %u)\n", maxwell_glsl_minpc ? "on" : !can ? "off (no subgroup arithmetic)" : "off (LARECOMP_VK_MINPC=0)",
+            sg.subgroupSize);
+    }
 }
 
 static bool g_fault_ext;

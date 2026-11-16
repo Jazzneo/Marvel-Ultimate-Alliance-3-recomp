@@ -126,6 +126,15 @@ extern bool maxwell_gmem_lazy;
 // runtime imports the bound storage buffers' chunks before the draw. true (LARECOMP_VK_GMEM_FS_MISS=1): every shader
 // counts, none declares early tests.
 extern bool maxwell_gmem_fs_miss;
+// (GLSL compute) A shader with branches runs as a state machine, `switch (pc)` in a loop: lanes of a subgroup at
+// different pcs run their cases one after another, and lanes whose paths through a branch took a different number of
+// steps stay out of step after it - each case running twice, half full - where the GPU the shader was written for
+// brings them back together (SSY / SYNC). true: each step runs only the lanes at the subgroup's lowest pc
+// (subgroupMin; the others wait), so lanes meet again where their paths join and a loop's lanes wait for the last
+// one. The light culling's warp-wide atomics (ballot, one lane's atomicAdd, a shuffle) then see the whole warp, not
+// part of it. Set by vulkan/device.c when the GPU has subgroup arithmetic in compute shaders (LARECOMP_VK_MINPC=0:
+// off). Not for vertex / fragment shaders: measured slower there (helper invocations).
+extern bool maxwell_glsl_minpc;
 // Lazy mode, vertex / fragment: the chunks under the draw's storage buffers (where the heap reads are) come as push
 // constants, GDirect { uvec4 gd[GMEM_DIRECT_MAX]; } (x = first word, y = words, 0: unused, z, w = device address), and
 // as storage buffers GDir<k> at GMEM_DIRECT_BINDING + k of the chunk set: an access in one is a compare and a plain

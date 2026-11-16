@@ -5587,6 +5587,7 @@ static CsProg *compute_program(NvnProgram *np, uint32_t smask) {
     if (cp) {
         if (n < 256) { tab[n].addr = ss->code_addr; tab[n].smask = smask; tab[n].cp = cp; g_cs_n = n + 1; }
         shader_fp_check(&cp->p.fp[0], ss, "cs");
+        if (cp->si && cp->si->msl) save_glsl(cp->si->msl, ss->code_addr, "cs");  // (LARECOMP_SAVE_MSL, as below)
         return cp;
     }
     shader_first_visit("compute", ch, 0, cs_content_key(ch, local, smask));
