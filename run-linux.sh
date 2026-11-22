@@ -11,8 +11,11 @@ if [[ ${1:-} == --game-mode ]]; then
 fi
 if [[ ${1:-} == --launcher ]]; then shift; fi
 # Keep terminal output when explicitly started from a shell. Desktop launches
-# write directly to a log without creating a terminal window.
-if [[ -t 1 ]]; then
+# write directly to a log without creating a terminal window. RecompLauncher's
+# setup step (--prepare) reads the "progress" lines on stdout, so it keeps them too.
+prepare=0
+for arg in "$@"; do [[ $arg == --prepare ]] && prepare=1; done
+if [[ -t 1 ]] || ((prepare)); then
     exec > >(tee -a "$root/launcher-start.log") 2>&1
 else
     exec >> "$root/launcher-start.log" 2>&1
@@ -29,7 +32,9 @@ if ((result)); then
     message="MUA3 Recomp could not start (exit $result).
 Details: $root/launcher-start.log"
     echo "$message"
-    if command -v kdialog >/dev/null 2>&1; then
+    if ((prepare)); then
+        :  # (RecompLauncher shows the error itself)
+    elif command -v kdialog >/dev/null 2>&1; then
         kdialog --title 'MUA3 Recomp' --error "$message" || true
     elif command -v zenity >/dev/null 2>&1; then
         zenity --error --title='MUA3 Recomp' --text="$message" || true
