@@ -13,6 +13,15 @@ if [[ ! -f /run/.containerenv && ! -f /run/.toolboxenv ]]; then
         steamos|holo)
             exec bash "$PWD/tools/steamdeck_setup.sh" "$@"
             ;;
+        *)
+            # Immutable desktops (Bazzite, Silverblue, Kinoite, ...) have no compiler or development packages on the
+            # host: INSTALL uses the same Fedora Distrobox as the Steam Deck. Hosts with the packages (or a ready
+            # mua3recomp Toolbox, which tools/build_linux.sh uses itself) keep building on the host.
+            if ! sh "$PWD/tools/build_linux.sh" --check >/dev/null 2>&1 && command -v distrobox >/dev/null 2>&1; then
+                echo 'Development packages missing on this system: using the mua3recomp-deck Distrobox.'
+                exec bash "$PWD/tools/steamdeck_setup.sh" "$@"
+            fi
+            ;;
     esac
 fi
 if [[ -x build/mua3launcher && build/mua3launcher -nt launcher/launcher.cpp ]]; then
