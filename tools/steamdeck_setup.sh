@@ -24,9 +24,14 @@ full_ffmpeg() {
             return 0
         fi
     fi
-    if [[ -x "$root/build/mua3recomp" && ! -f "$root/build/lib/.full-ffmpeg" ]]; then
+    # The marker holds the checksum of the libavcodec it copied: an update extracted over the folder brings back the
+    # release's ffmpeg-free libraries but leaves the old marker, so a bare marker isn't trusted.
+    local sum
+    sum=$(cat "$root"/build/lib/libavcodec.so.* 2>/dev/null | sha256sum | cut -c1-64)
+    if [[ -x "$root/build/mua3recomp" && "$(cat "$root/build/lib/.full-ffmpeg" 2>/dev/null)" != "$sum" ]]; then
         echo 'Movies: copying the full FFmpeg into the game'"'"'s libraries...'
-        python3 "$root/tools/bundle_runtime_linux.py" && touch "$root/build/lib/.full-ffmpeg"
+        python3 "$root/tools/bundle_runtime_linux.py" &&
+            cat "$root"/build/lib/libavcodec.so.* | sha256sum | cut -c1-64 > "$root/build/lib/.full-ffmpeg"
     fi
 }
 
@@ -62,7 +67,7 @@ if ((terminal)); then
 fi
 
 if ! command -v distrobox >/dev/null 2>&1; then
-    echo 'ERROR: Distrobox is missing. Update SteamOS in Desktop Mode (or install distrobox), then try again.' >&2
+    echo 'ERROR: Distrobox is missing. Update SteamOS in Desktop Mode, then try again.' >&2
     echo 'Manual installation guide: https://github.com/89luca89/distrobox/blob/main/docs/posts/steamdeck_guide.md' >&2
     if ((!terminal)) && command -v kdialog >/dev/null 2>&1; then
         kdialog --error 'Distrobox is missing. Update SteamOS, then try again. See STEAMOS.md for the manual installation guide.' || true
@@ -87,10 +92,6 @@ fi
 if [[ ! -t 0 ]] && ((!terminal)); then
     if command -v konsole >/dev/null 2>&1; then
         exec konsole -e bash "$root/tools/steamdeck_setup.sh" --terminal "$@"
-    elif command -v ptyxis >/dev/null 2>&1; then
-        exec ptyxis -- bash "$root/tools/steamdeck_setup.sh" --terminal "$@"
-    elif command -v gnome-terminal >/dev/null 2>&1; then
-        exec gnome-terminal --wait -- bash "$root/tools/steamdeck_setup.sh" --terminal "$@"
     elif command -v xterm >/dev/null 2>&1; then
         exec xterm -e bash "$root/tools/steamdeck_setup.sh" --terminal "$@"
     fi
@@ -98,7 +99,7 @@ if [[ ! -t 0 ]] && ((!terminal)); then
     exit 1
 fi
 
-echo 'MUA3 Recomp: preparing the development environment (a Fedora Distrobox).'
+echo 'MUA3 Recomp: preparing the Steam Deck development environment.'
 echo 'First setup downloads Fedora and development packages. Keep this window open.'
 if ((!exists)); then
     distrobox create --yes --name "$box" --image docker.io/library/fedora:44

@@ -3418,9 +3418,24 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
     c->blob = blob; c->blob_size = max_size;
+    // Programs whose structured translation is known to go wrong keep the dispatcher (and with it the size limit
+    // below, as before structure_flow existed). MUA3's big effect compute program (cs 72b45dd400 in 4.0.1): run
+    // structured, its results make the game's own effect code corrupt its object lists, and the chapter 3 Elektra
+    // fight crashes within minutes (signal 11 on a pointer with its top half cut, a different place each time). On
+    // the dispatcher it is over LARECOMP_MAX_DISPATCHER_KB and skipped, as before the structured translation (Deck update v6). Identified by an FNV-1a
+    // hash of the program's instructions; LARECOMP_STRUCT_SKIP=<h..., ...> adds others (debug).
+    bool no_struct = false;
+    if (c->glsl && any_branch && stage == STAGE_COMPUTE) {
+        static const uint64_t known_bad[] = {0xe52be17d71169b81ull};
+        uint64_t h = 1469598103934665603ull;
+        for (size_t k = 0; k < end * 8; k++) h = (h ^ code[k]) * 1099511628211ull;
+        for (size_t k = 0; k < sizeof known_bad / sizeof known_bad[0]; k++) no_struct |= h == known_bad[k];
+        const char *e = getenv("LARECOMP_STRUCT_SKIP");
+        if (e && *e) { char id[24]; snprintf(id, sizeof id, "h%016llx", (unsigned long long)h); no_struct |= strstr(e, id) != NULL; }
+    }
     const uint64_t *sc = (const uint64_t *)code;  // (structure_flow: the program, its subroutines copied in: expand_calls)
     size_t send = end;
-    if (c->glsl && any_branch && stage == STAGE_COMPUTE && (c->vcode = expand_calls(c, sc, end, &send))) {
+    if (c->glsl && any_branch && !no_struct && stage == STAGE_COMPUTE && (c->vcode = expand_calls(c, sc, end, &send))) {
         sc = c->vcode;
         c->code = (const uint8_t *)sc; c->ninsts = send;
         static_stacks(c, sc, send, blob, max_size);
@@ -3434,7 +3449,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         }
     }
     if (c->glsl && any_branch && !c->structured) static_stacks(c, (const uint64_t *)code, end, blob, max_size);
-    if (c->glsl && any_branch && !c->structured) structure_flow(c, (const uint64_t *)code, end);
+    if (c->glsl && any_branch && !no_struct && !c->structured) structure_flow(c, (const uint64_t *)code, end);
     if (c->structured) {  // (structure_flow: the instructions in order, the constructs around them; unreached ones left out)
         for (size_t i = 1, oi = 0; i < send && (!c->fail || survey_on()); i++) {
             if (i % 4 == 0) continue;

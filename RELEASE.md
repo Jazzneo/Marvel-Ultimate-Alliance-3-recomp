@@ -18,6 +18,8 @@ A community Linux port of [VirtuaQuest’s Marvel Ultimate Alliance 3 Recomp](ht
 - Bundled Vulkan Memory Allocator header and license.
 - Steam Deck black screen workaround: on-demand synchronous shader compilation and display-session forwarding.
 - Desktop launcher that opens only the program window during normal launches.
+- Chapter 3 Elektra fight crash fixed (v8.4): one big effects compute program keeps its pre-speed-up translation (runtime/nvn/maxwell/translate.c). Tested on a Steam Deck through the boss fight.
+- Copy the game data (v8.3): INSTALL copies the game's data out of your NSPs (about 18 GB), so the game no longer stops at startup when the NSPs are moved, renamed or on an SD card that isn't in. On by default; COPY NOW on GAME FILES converts an existing install without rebuilding.
 - Button icons that match your controller: Nintendo, Xbox, PlayStation, Steam Deck or Steam Controller (Settings > Controls > Button icons; see STEAMOS.md).
 
 ## Getting started

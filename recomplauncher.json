@@ -17,7 +17,7 @@
   "inputs": [
     {
       "id": "base",
-      "label": "Your MARVEL ULTIMATE ALLIANCE 3: The Black Order game: an NSP or XCI dumped from your own Switch. Keep it where it is: the game reads its data from it.",
+      "label": "Your MARVEL ULTIMATE ALLIANCE 3: The Black Order game: an NSP or XCI dumped from your own Switch. Setup copies the game data out of it (about 18 GB), so you can move it afterwards.",
       "role": "game",
       "formats": [
         {
@@ -29,7 +29,7 @@
     },
     {
       "id": "update",
-      "label": "The game's 4.0.1 update (NSP, version 524288) from your own Switch. Keep it where it is too.",
+      "label": "The game's 4.0.1 update (NSP, version 524288) from your own Switch.",
       "role": "update",
       "formats": [
         {

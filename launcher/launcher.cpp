@@ -484,6 +484,7 @@ static std::mutex g_dialog_mu;
 static std::string g_dialog_result;
 static int g_dialog_target = -1;  // (which field the open file dialog fills)
 static char *const g_path_fields[] = {p_base, p_update, p_dlc, p_keys};
+static bool g_copy_data = true;  // INSTALL copies the game data out of the NSPs (extracted/romfs): they aren't needed after
 
 static void paths_from_ini(void) {
     snprintf(p_base, sizeof p_base, "%s", g_launcher_ini.get("base_game", "").c_str());
@@ -491,6 +492,7 @@ static void paths_from_ini(void) {
     snprintf(p_dlc, sizeof p_dlc, "%s", g_launcher_ini.get("dlc", "").c_str());
     snprintf(p_keys, sizeof p_keys, "%s", g_launcher_ini.get("keys", "").c_str());
     snprintf(p_msys, sizeof p_msys, "%s", g_launcher_ini.get("msys2", "C:\\msys64").c_str());
+    g_copy_data = g_launcher_ini.get("copy_game_data", "1") != "0";
 }
 static void paths_to_ini(void) {
     g_launcher_ini.set("base_game", p_base);
@@ -498,6 +500,7 @@ static void paths_to_ini(void) {
     g_launcher_ini.set("dlc", p_dlc);
     g_launcher_ini.set("keys", p_keys);
     g_launcher_ini.set("msys2", p_msys);
+    g_launcher_ini.set("copy_game_data", g_copy_data ? "1" : "0");
     g_launcher_ini.save(APP " launcher: your game files (never shared) and tools");
 }
 
@@ -514,7 +517,7 @@ static void browse(int target, SDL_Window *win) {
     SDL_ShowOpenFileDialog(dialog_done, (void *)(intptr_t)target, win, f, 2, NULL, false);
 }
 
-struct Status { bool venv, msys, extracted, built, nsps_there; std::string version, missing_nsp; };
+struct Status { bool venv, msys, extracted, built, nsps_there, data_copied; std::string version, missing_nsp; };
 static Status g_status;
 static std::string nacp_version(void) {  // (control.nacp: DisplayVersion at 0x3060, 16 bytes)
     FILE *f = fopen((g_root + "extracted\\control\\control.nacp").c_str(), "rb");
@@ -542,7 +545,9 @@ static void check_nsps(void) {
     fclose(f);
 }
 static void refresh_status(void) {
-    g_status.extracted = is_file(g_root + "extracted\\exefs\\main") && is_file(g_root + "extracted\\romfs.src");
+    g_status.extracted = is_file(g_root + "extracted\\exefs\\main") &&  // (the data read from the NSPs, or copied out)
+                         (is_file(g_root + "extracted\\romfs.src") || is_dir(g_root + "extracted\\romfs"));
+    g_status.data_copied = !is_file(g_root + "extracted\\romfs.src") && is_dir(g_root + "extracted\\romfs");
     g_status.version = nacp_version();
     check_nsps();
     if (g_release) {  // (the tools are in the release; the generated C isn't kept once it's built)
@@ -953,6 +958,7 @@ static void worker(void) {
 static std::string extract_args(void) {
     std::string c = " " + q(p_base) + " " + q(p_keys) + " extracted --update " + q(p_update);
     if (p_dlc[0]) c += " --dlc " + q(p_dlc);
+    if (g_copy_data) c += " --romfs extract";  // (falls back to reading the NSPs in place when there isn't room)
     return c + " --title " GAME_TITLE_ID " --build " GAME_BUILD_ID " --want \"" GAME_WANT "\"";
 }
 
@@ -1064,7 +1070,7 @@ static std::string launch_game(int *wait_code = nullptr) {
     if (!is_dir(g_root + "extracted")) return "No game files set up yet: choose them on GAME FILES, then INSTALL.";
     if (!g_status.nsps_there)
         return "Your game file moved: " + g_status.missing_nsp + ". The game reads its data from your NSPs where they "
-               "were set up: put it back, or set up your game files again (GAME FILES).";
+               "were set up: put it back, then use COPY NOW on GAME FILES so the game doesn't need the NSPs anymore.";
 #ifdef _WIN32
     SetEnvironmentVariableA("LARECOMP_DATA_ROOT", g_root.c_str());  // (as tools/run.sh: the data folder)
     {   // the build copies the runtime DLLs next to the game (make dlls); MSYS2's own folder is the fallback
@@ -1280,7 +1286,7 @@ static void page_play(void) {
     section("READY TO PLAY");
     struct { const char *name; bool ok; const char *fix; } rows[] = {
         {"Your game files are set up", g_status.extracted, "GAME FILES: choose your game, update and keys, then INSTALL."},
-        {"Your NSPs are where they were set up", g_status.nsps_there, "Put them back, or INSTALL again from GAME FILES."},
+        {"Your NSPs are where they were set up", g_status.nsps_there, "Put them back, then COPY NOW on GAME FILES so they aren't needed again."},
         {"The PC version is built", g_status.built, "GAME FILES: INSTALL builds it."},
     };
     for (auto &r : rows) {
@@ -1326,14 +1332,27 @@ static void path_row(const char *label, int target, SDL_Window *win, bool option
 static void page_setup(SDL_Window *win) {
     section("YOUR GAME FILES");
     hint("Use your own copy of MARVEL ULTIMATE ALLIANCE 3: The Black Order, dumped from your Switch with your own keys. "
-         "Nothing is downloaded or shared. The game's data stays in your NSP / XCI files and is read from them where they "
-         "are, so keep them in place after setting up.");
+         "Nothing is downloaded or shared. INSTALL copies the game's data out of your NSP / XCI files (about 18 GB), so "
+         "you can move or delete them afterwards. Untick the copy to save the space: the game then reads your NSPs where "
+         "they are, so they have to stay in place.");
     ImGui::Spacing();
     float lw = 250 * g_scale;
     path_row("Base game (NSP or XCI)", 0, win, false, lw);
     path_row("Update 4.0.1 (NSP)", 1, win, false, lw);
     path_row("Expansion Pass (optional)", 2, win, true, lw);
     path_row("Keys (prod.keys)", 3, win, false, lw);
+    if (ImGui::Checkbox("Copy the game data (about 18 GB): the NSPs aren't needed after INSTALL", &g_copy_data)) paths_to_ini();
+    if (g_status.extracted && !g_status.data_copied) {  // (set up to read the NSPs: copy the data now, no rebuild)
+        ImGui::SameLine();
+        bool inputs_ok = p_base[0] && is_file(p_base) && p_keys[0] && is_file(p_keys) && p_update[0] && is_file(p_update);
+        if (gem_button("COPY NOW", ImVec2(130 * g_scale, ImGui::GetFrameHeight()), k_gem[2], !g_running && inputs_ok && g_copy_data)) {
+            paths_to_ini();
+            start_steps(true, false, false);
+        }
+    } else if (g_status.data_copied) {
+        check_mark(true);
+        ImGui::TextUnformatted("Game data copied: the game doesn't need your NSPs");
+    }
     ImGui::Spacing();
     if (g_release) {
         check_mark(true);

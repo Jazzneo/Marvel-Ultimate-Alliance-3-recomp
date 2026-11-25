@@ -12,6 +12,7 @@ which in one line, as does an add-on content NSP of another game (the release's 
 import argparse
 import bisect
 import os
+import shutil
 import struct
 import sys
 
@@ -347,7 +348,8 @@ def main():
     ap.add_argument('--list', action='store_true', help='describe the NCAs only')
     ap.add_argument('--romfs', choices=('source', 'extract', 'none'), default='source',
                     help='source (default): write <outdir>/romfs.src, the RomFS read in place from the NSPs; '
-                         'extract: copy every file out to <outdir>/romfs')
+                         'extract: copy every file out to <outdir>/romfs (the NSPs not needed afterwards; '
+                         'falls back to source when there isn\'t room)')
     ap.add_argument('--files', help='also copy out the RomFS files whose path contains this text')
     ap.add_argument('--title', help="the game's title ID (hex): any other game is refused, with a one-line reason")
     ap.add_argument('--build', help="the start of exefs/main's build ID (hex): any other version is refused")
@@ -390,14 +392,47 @@ def main():
         romfs, sources = bsec[1], [(a.nsp, bsec[1])]
     files = romfs_files(romfs)
     print(f' romfs: {len(files)} files, {sum(f[2] for f in files):,} bytes')
+    total = sum(f[2] for f in files)
+    if a.romfs == 'extract':  # (a full copy: the NSPs aren't needed afterwards, if there's room for it)
+        os.makedirs(a.outdir, exist_ok=True)
+        old = os.path.join(a.outdir, 'romfs')
+        have = old if os.path.isdir(old) and not os.path.exists(os.path.join(a.outdir, 'romfs.src')) else None
+        free = shutil.disk_usage(a.outdir).free
+        old_size = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(have) for f in fs) if have else 0
+        if have and free < total + (1 << 30) <= free + old_size:  # (copied before: no room for both, so it goes first)
+            print('  removing the earlier copy of the game data first, to make room')
+            shutil.rmtree(have, ignore_errors=True)
+            free += old_size
+        if free < total + (1 << 30):
+            print(f'  Not enough free space to copy the game data ({(total + (1 << 30)) / 2**30:.1f} GB needed, '
+                  f'{free / 2**30:.1f} GB free): the game will read it from your NSPs instead, so keep them in place.')
+            a.romfs = 'source'
     if a.romfs == 'source':
         write_romfs_source(os.path.join(a.outdir, 'romfs.src'), romfs, sources)
         print(f'  {os.path.join(a.outdir, "romfs.src")}: read in place from the NSPs')
+    # the full copy goes to romfs.copying and replaces romfs only once it's complete (a cancelled copy changes nothing)
+    dest = os.path.join(a.outdir, 'romfs.copying' if a.romfs == 'extract' else 'romfs')
+    if a.romfs == 'extract':
+        shutil.rmtree(dest, ignore_errors=True)
+        print(f'  copying {len(files)} files ({total / 2**30:.1f} GB): the NSPs won\'t be needed afterwards')
+    done = 0
     for path, off, size in files:
         if a.romfs == 'extract' or (a.files and a.files in path):
-            copy_out(romfs.read, romfs.data_off + off, size, os.path.join(a.outdir, 'romfs', path.lstrip('/')))
+            copy_out(romfs.read, romfs.data_off + off, size, os.path.join(dest, path.lstrip('/')))
             if a.romfs != 'extract':
                 print(f'  {path} {size:,}')
+            else:
+                done += size
+                if done * 20 // max(total, 1) != (done - size) * 20 // max(total, 1):
+                    print(f'  {done * 100 // max(total, 1)}% copied', flush=True)
+    if a.romfs == 'extract':
+        out = os.path.join(a.outdir, 'romfs')
+        shutil.rmtree(out, ignore_errors=True)
+        os.replace(dest, out)
+        src = os.path.join(a.outdir, 'romfs.src')  # (the runtime prefers romfs.src: keep it only as a backup)
+        if os.path.exists(src):
+            os.replace(src, src + '.before-copy')
+        print(f'  {out}: the game data, copied (the NSPs can be moved or deleted now)')
     print(' control:')
     extract_romfs((upd or base)['control'].sections[0], os.path.join(a.outdir, 'control'), verbose=True)
     for path, ncas in dlcs:  # (as a RomFS image, served as it is: MUA3's pass holds one empty file, named by a

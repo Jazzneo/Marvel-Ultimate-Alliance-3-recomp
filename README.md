@@ -21,7 +21,7 @@ your own console.
 ## Linux / Steam Deck (this fork)
 
 This fork adds a native **Linux and Steam Deck** version of
-[VirtuaQuest's MUA3 Recomp](https://github.com/VirtuaQuest/Marvel-Ultimate-Alliance-3-recomp). Latest: **v8.2**,
+[VirtuaQuest's MUA3 Recomp](https://github.com/VirtuaQuest/Marvel-Ultimate-Alliance-3-recomp). Latest: **v8.4**,
 tested on a Steam Deck LCD (SteamOS, RADV).
 
 **What's new in this fork:**
@@ -35,6 +35,12 @@ tested on a Steam Deck LCD (SteamOS, RADV).
   CPU and GPU work side by side.
 - **Smooth movies.** Hardware video decoding (VAAPI), movies read into memory up front, GPU colour conversion, and no
   more 2-second pauses.
+- **No NSPs needed after INSTALL (v8.3).** INSTALL copies the game data out of your NSP / XCI files (about 18 GB), so
+  the game no longer stops at startup when they're moved or on an SD card that isn't in. "Copy the game data" on GAME
+  FILES (on by default); COPY NOW converts an existing install without rebuilding.
+- **Chapter 3 Elektra fight crash fixed (v8.4).** One big effects compute program goes back to how it ran before the
+  faster shader translation (`runtime/nvn/maxwell/translate.c`); its translated results made the game's own effect code
+  corrupt its object lists a few minutes into that fight.
 - **Fixes:** no audio dropouts, no crash on "return to start screen", an on-screen "PRELOADING SHADERS" bar, and a
   **Fill screen (stretch)** aspect option for the Deck's 16:10 screen.
 - **Steam Deck setup:** `run.sh` sets up a Fedora distrobox with everything needed to build, and `play-steam.sh` is the
@@ -42,7 +48,7 @@ tested on a Steam Deck LCD (SteamOS, RADV).
 
 **Install (Linux / Steam Deck):**
 
-1. Download `MUA3-Recomp-Linux-SteamDeck-v<version>-public.tar.gz` from
+1. Download `MUA3-Recomp-v<version>-Linux-x64.tar.gz` from
    [this fork's Releases](https://github.com/Jazzneo/Marvel-Ultimate-Alliance-3-recomp/releases) and extract it
    somewhere you can write to (on a Deck, for example `~/Applications`).
 2. In Desktop Mode, run `MUA3 Recomp.desktop` (or `./run.sh`). The first start needs internet: it creates the build
@@ -59,8 +65,9 @@ Logs (`lasrecomp.log`, `game-mode.log`) go to the game folder. Setup details and
 MUA3 Recomp works with [RecompLauncher](https://recomplauncher.com): install it from the launcher, then give Easy Setup
 your game (NSP or XCI), the 4.0.1 update NSP, the Expansion Pass NSP if you have it, and your `prod.keys`. The setup
 step recompiles the game for your PC (20 to 40 minutes, depending on the CPU; nothing else to install), then Play
-starts it. Video, sound, controller and keyboard settings are on the game's page. Keep your NSP / XCI files where they
-are: the game reads its data from them. Started from Big Picture mode the game opens full screen (your own window
+starts it. Video, sound, controller and keyboard settings are on the game's page. The launcher's INSTALL copies the
+game data out of your NSP / XCI files (about 18 GB), so you can move or delete them afterwards (untick "Copy the game
+data" to keep reading them in place instead). Started from Big Picture mode the game opens full screen (your own window
 setting is kept for other starts), and its menus name your controller's buttons from the first frame.
 
 **Recomp Achievements:** the recomp reports the story's progress to RecompLauncher (the chapter each story movie
@@ -88,10 +95,11 @@ setup (about 0.5 GB stays). The setup took 20 minutes on an 8-core Intel i7-1170
 night with drifting nebula glows and stars, and six gem colours, one for each page. It has five pages, each usable with
 the mouse, the keyboard or a controller:
 
-- **PLAY**: checks the game files are set up, your NSPs are still where they were, and the PC version is built; PLAY
+- **PLAY**: checks the game files are set up, the game data is there (copied, or your NSPs still where they were), and the PC version is built; PLAY
   saves the settings and starts the game.
 - **GAME FILES**: picks your files and INSTALLs (extract, recompile, build) with a live log; REBUILD recompiles from
-  the files already set up.
+  the files already set up. "Copy the game data" (on by default) makes INSTALL copy the data out of your NSPs so they
+  aren't needed afterwards; COPY NOW does that for an install that still reads the NSPs.
 - **DISPLAY**: window mode and size, render resolution, upscaler, anti-aliasing, aspect ratio, frame rate 30 / 60 / 120,
   the FPS counter, volume and movie sound.
 - **CONTROLS**: remap every Switch button and stick direction on the keyboard, and every button on a controller: click
@@ -119,8 +127,9 @@ runtime (`runtime/`) provides what the Switch would: a small Horizon kernel (thr
 | `subsdk0` | Nintendo multimedia (movie playback) | not loaded: `movie::` is host code on FFmpeg (`runtime/hle/movie.c`) |
 | `subsdk1` | NVIDIA glslc (runtime GLSL compiler) | recompiled: `generated/glslc` |
 
-The game data (18.4 GB with the update) is not copied out: `tools/nsp_extract.py` writes `extracted/romfs.src`, and
-the runtime reads the data in place from your NSPs (`runtime/romfs_nca.c`).
+The game data (18.4 GB with the update): `tools/nsp_extract.py --romfs extract` (the launcher's default) copies it to
+`extracted/romfs`, so the NSPs aren't needed afterwards. Without it, `extracted/romfs.src` makes the runtime read the
+data in place from your NSPs (`runtime/romfs_nca.c`), and they have to stay where they are.
 
 ## Build from source (Windows)
 
@@ -130,7 +139,8 @@ the runtime reads the data in place from your NSPs (`runtime/romfs_nca.c`).
    (Pillow: the window and executable icon, made from the game's own icon in your dump at build time).
 2. Extract your game (in Git Bash, `export MSYS_NO_PATHCONV=1` first):
    `.venv/Scripts/python -I tools/nsp_extract.py "<base>.nsp" "<your prod.keys>" extracted --update "<update>.nsp"
-   --dlc "<expansion pass>.nsp"`. Keep the NSPs where they are: the game data is read from them.
+   --dlc "<expansion pass>.nsp"`. Add `--romfs extract` to copy the game data out (about 18 GB), or keep the NSPs where they are: the game data is
+   then read from them.
 3. In Git Bash with `export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"`:
    `make gen` (recompile the game code into `generated/`, a few minutes), then `make -j16` (about 10 to 20 minutes
    the first time) and `make dlls` (the runtime DLLs next to the programs, so they start from Explorer).
